@@ -86,6 +86,9 @@ pub struct LiveRound {
     pub commitments: [Option<[u8; 32]>; 3],
     pub moves: [Option<u8>; 3],
     pub reasonings: [Option<String>; 3],
+    /// Block height of `begin_settle`. `finalize_settle` must be a later block
+    /// so the settler cannot choose `env::random_seed()`.
+    pub settle_height: Option<u64>,
 }
 
 #[near(serializers = [borsh])]
@@ -188,7 +191,9 @@ pub fn validate_reveal(move_id: u8, reasoning: &str) -> Result<(), &'static str>
 }
 
 pub fn phase_of(round: &LiveRound, now: u64) -> &'static str {
-    if now < round.betting_end_ns {
+    if round.settle_height.is_some() {
+        "finalize"
+    } else if now < round.betting_end_ns {
         "betting"
     } else if now < round.reveal_end_ns {
         "reveal"
@@ -233,7 +238,28 @@ pub fn open_round(
         commitments: [None, None, None],
         moves: [None, None, None],
         reasonings: [None, None, None],
+        settle_height: None,
     }
+}
+
+pub fn begin_settle(round: &mut LiveRound, now: u64, height: u64) -> Result<(), &'static str> {
+    if round.settle_height.is_some() {
+        return Err("settle already begun");
+    }
+    if !ready_to_settle(round, now) {
+        return Err("round is not ready to settle");
+    }
+    round.settle_height = Some(height);
+    Ok(())
+}
+
+/// Finalize is legal only in a strictly later block than `begin_settle`.
+pub fn finalize_guard(round: &LiveRound, height: u64) -> Result<(), &'static str> {
+    let begun = round.settle_height.ok_or("settle has not begun")?;
+    if height <= begun {
+        return Err("finalize in a later block");
+    }
+    Ok(())
 }
 
 pub fn initial_retired(treasury: u128, min_treasury: u128) -> bool {
@@ -293,6 +319,9 @@ pub fn apply_back(
     storage_cost: u128,
     now: u64,
 ) -> Result<(), &'static str> {
+    if round.settle_height.is_some() {
+        return Err("settle already begun");
+    }
     if now >= round.betting_end_ns {
         return Err("betting is closed");
     }
@@ -327,6 +356,9 @@ pub fn apply_commit(
     commitment: [u8; 32],
     now: u64,
 ) -> Result<(), &'static str> {
+    if round.settle_height.is_some() {
+        return Err("settle already begun");
+    }
     if round.id != round_id {
         return Err("stale round");
     }
@@ -352,6 +384,9 @@ pub fn apply_reveal(
     digest: [u8; 32],
     now: u64,
 ) -> Result<(), &'static str> {
+    if round.settle_height.is_some() {
+        return Err("settle already begun");
+    }
     if round.id != round_id {
         return Err("stale round");
     }
@@ -393,7 +428,7 @@ pub fn apply_fund(
     if agent.retired && agent.treasury >= min_treasury && agent.treasury > 0 {
         agent.retired = false;
         revived = true;
-        if now < round.betting_end_ns {
+        if round.settle_height.is_none() && now < round.betting_end_ns {
             round.alive[agent_index] = true;
         }
     }
@@ -408,6 +443,8 @@ pub fn apply_settle(
     if !ready_to_settle(&econ.round, now) {
         return Err("round is not ready to settle");
     }
+    // The contract calls `finalize_guard` before this. Direct sim tests score
+    // without a block height; they do not go through the two-block gate.
 
     let mut moves = [None; 3];
     let mut reasonings: [Option<String>; 3] = [None, None, None];

@@ -22,9 +22,13 @@ See a passing run. It covers the winner rule, a full round with pro-rata payout,
 ./scripts/build-wasm.sh
 ```
 
-See `target/wasm32-unknown-unknown/release/near_agent_arena.wasm` and its size in bytes. The script passes `--cfg near` so the binary imports real NEAR host functions. A plain `cargo build --target wasm32-unknown-unknown` without that flag is not valid on chain.
+See `target/wasm32-unknown-unknown/release/near_agent_arena.wasm` and its size in bytes. The script passes `--cfg near` so the binary imports real NEAR host functions. A plain `cargo build --target wasm32-unknown-unknown` without that flag is not valid on chain. `rust-toolchain.toml` pins Rust 1.99.1 so the bytes match CI.
 
-Current size from this build: **220129 bytes**.
+The reproducible artifact checked into git is `contract/res/near_agent_arena.wasm` (225213 bytes, sha256 `19569dc86083e08b776fb5aef56ddb7e4be6b1e92d24e9eac9c3b396c52aef8e`), with the same digest in `contract/res/SHA256SUMS`. CI builds a fresh wasm and fails if `cmp` or `sha256sum -c` disagrees.
+
+```bash
+cd contract/res && sha256sum -c SHA256SUMS
+```
 
 ### 3. Sandbox integration tests
 
@@ -138,7 +142,12 @@ score(i)   = matchup(i) * 256 + entropy(i)
 
 `256` is greater than any entropy byte, so the seed only breaks matchup ties. It cannot overturn a matchup lead. The highest score wins. If two scores are equal, the lower agent id wins. That rule is total: there is at most one winner whenever anyone revealed.
 
-`random_seed` is `env::random_seed()` from the block that includes the `settle` transaction. The frontend cannot choose the winner. A caller can choose which block settles, and therefore which seed is used. Moves are already committed before betting closes, so grinding does not let anyone change a move after seeing bets. A later milestone can split settle across two blocks so the seed is from a block the settler does not choose.
+Settlement is two transactions:
+
+1. `begin_settle` locks the round in the current block and does not read a seed.
+2. `finalize_settle` must be in a strictly later block. It reads `env::random_seed()` from that later block, scores the round, and opens the next one.
+
+The account that begins settlement cannot choose the seed, because the seed does not exist until a future block is produced. A regular caller of `finalize_settle` also does not know the seed before that block is built. Same-block finalize fails with `finalize in a later block`. Payouts are still individual `claim` calls.
 
 ### Worked examples
 
@@ -163,6 +172,8 @@ Upkeep is charged only from agents who were alive this round: `min(treasury, upk
 `new` keeps up to 1 NEAR of the attached deposit as a state-growth buffer so round history can be stored. The rest is split across the three agents as starting treasury. An agent below `min_treasury`, or at zero, starts retired.
 
 `back_agent` measures storage growth and subtracts that cost from the attached deposit. The remainder is the wager. The first bet in a round is slightly smaller than the attached amount. The contract does not loop over users at settle.
+
+`withdraw_treasury(agent_id, amount)` sends that much of an agent's escrowed treasury to the agent's own account. The predecessor must be the owner or that agent. Withdrawing the treasury to zero retires the agent. If betting is still open, they also leave the current round. Bets already placed stay in the pool and are still claimed one account at a time. The owner cannot redirect the NEAR to themselves. `withdraw_protocol` is separate and only moves upkeep the contract has already collected.
 
 ## NEAR features used
 
@@ -196,9 +207,65 @@ This project was built with AI coding assistance during NEAR HACKATHON.
 
 It is inspired by the author's earlier WIF Agent Arena on Robinhood Chain. This repository is a fresh codebase written for NEAR: new contract, worker, and frontend. It is not a port of that project's source. No pre-hackathon library from that project is vendored here.
 
-## Not in this milestone
+## Testnet deploy
 
-- A public testnet deploy and a live cron with a real `NEAR_AI_API_KEY`.
-- Moving escrowed treasury out to the agent sub-account so the explorer balance changes. Views already show the treasury growing and shrinking.
-- A two-block settle so the random seed is not chosen by the settler.
+Run this on a machine that has [near-cli-rs](https://github.com/near/near-cli-rs) (`near`) and credentials in `~/.near-credentials`. A git checkout is not required. Download `scripts/deploy-testnet.sh`, `contract/res/near_agent_arena.wasm`, and `contract/res/SHA256SUMS`, and keep those two files in the same directory if you are not in the repo.
+
+Account names, for `ARENA_ACCOUNT=arena.testnet`:
+
+| Account | Role |
+| --- | --- |
+| `arena.testnet` | Contract. Full-access key signs deploy, init, and later `begin_settle` / `finalize_settle`. |
+| `OWNER_ACCOUNT` | Stored owner. May call `withdraw_treasury` and `withdraw_protocol`. Can be the same account as the arena. |
+| `momentum.arena.testnet` | Agent 0 |
+| `mean-reversion.arena.testnet` | Agent 1 |
+| `breakout.arena.testnet` | Agent 2 |
+
+Agent function-call keys allow only `commit` and `reveal` on the arena. They cannot transfer NEAR or settle. Settle is permissionless, so the worker's settler is the arena account's full-access key, not an agent key.
+
+Put at least 15 testnet NEAR on `ARENA_ACCOUNT` first (3 NEAR to create each sub-account, 4 NEAR attached to `new`, plus gas). Then:
+
+```bash
+export ARENA_ACCOUNT=arena.testnet
+export OWNER_ACCOUNT=you.testnet
+export WASM_PATH=/absolute/path/near_agent_arena.wasm   # omit inside a checkout
+./scripts/deploy-testnet.sh
+```
+
+The script runs these near-cli-rs commands. It prints public keys only. Private keys stay in `~/.near-credentials` and in `~/.near-credentials/near-agent-arena-keys.json` (mode 600). Copy that JSON into the GitHub secret `NEAR_AGENT_KEYS_JSON`. Do not commit it.
+
+```bash
+near account create-account fund-myself momentum.arena.testnet '3 NEAR' \
+  autogenerate-new-keypair save-to-keychain \
+  sign-as arena.testnet network-config testnet sign-with-keychain send
+# same for mean-reversion.arena.testnet and breakout.arena.testnet
+
+near contract deploy arena.testnet \
+  use-file near_agent_arena.wasm \
+  without-init-call \
+  network-config testnet sign-with-keychain send
+
+near contract call-function as-transaction arena.testnet new \
+  json-args '<init json>' \
+  prepaid-gas '100 Tgas' \
+  attached-deposit '4 NEAR' \
+  sign-as arena.testnet network-config testnet sign-with-keychain send
+
+near account add-key momentum.arena.testnet \
+  grant-function-call-access \
+    --allowance '2 NEAR' \
+    --contract-account-id arena.testnet \
+    --function-names 'commit,reveal' \
+  autogenerate-new-keypair save-to-keychain \
+  network-config testnet sign-with-keychain send
+# same add-key for the other two agents
+```
+
+`new` attaches 4 NEAR. One NEAR is the state buffer. The rest is split across the three treasuries, about 1 NEAR each. Upkeep is 0.05 NEAR per alive agent per round. Betting lasts 20 minutes and reveal lasts 10 minutes, so the 10-minute worker cron can commit, reveal, begin settlement, and finalize on a later tick. `min_treasury` is 0.2 NEAR.
+
+The cron workflow `.github/workflows/agent-cron.yml` runs every 10 minutes. It exits 0 without doing work until `NEAR_AGENT_KEYS_JSON` or `CONTRACT_ID` is set in the repository secrets. `NEAR_AI_API_KEY` is optional.
+
+## Still later
+
+- A live testnet deploy from the maintainer's machine, and the cron secret above.
 - Visual design beyond this readable skeleton.

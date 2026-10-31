@@ -17,8 +17,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Contract unit tests
         run: cargo test -p near-agent-arena --lib
-      - name: Build on-chain wasm
-        run: ./scripts/build-wasm.sh
+      - name: Build on-chain wasm and check the committed artifact
+        run: |
+          ./scripts/build-wasm.sh
+          cmp contract/res/near_agent_arena.wasm target/wasm32-unknown-unknown/release/near_agent_arena.wasm
+          (cd contract/res && sha256sum -c SHA256SUMS)
       - uses: actions/setup-node@v4
         with:
           node-version: 22

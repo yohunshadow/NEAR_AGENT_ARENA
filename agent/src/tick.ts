@@ -52,7 +52,7 @@ export async function tick(chain: Chain, config: TickConfig): Promise<number> {
   const roundId = arena.current.id;
   let failures = 0;
   console.log(
-    `round ${roundId} phase=${arena.current.phase} ready_to_settle=${arena.current.ready_to_settle} pool=${arena.current.pool}`,
+    `round ${roundId} phase=${arena.current.phase} ready_to_settle=${arena.current.ready_to_settle} ready_to_finalize=${arena.current.ready_to_finalize} pool=${arena.current.pool}`,
   );
 
   if (arena.current.phase === "betting") {
@@ -127,20 +127,25 @@ export async function tick(chain: Chain, config: TickConfig): Promise<number> {
   }
 
   const fresh = await chain.viewArena();
-  if (fresh.current.ready_to_settle) {
-    try {
-      await chain.callAs(config.settler, "settle", {});
+  try {
+    if (fresh.current.ready_to_finalize) {
+      await chain.callAs(config.settler, "finalize_settle", {});
       const after = await chain.viewArena();
       const settled = after.recent_rounds[0];
       console.log(
-        `settled round ${settled?.id} winner=${settled?.winner ?? "none"} next=${after.current.id}`,
+        `finalized round ${settled?.id} winner=${settled?.winner ?? "none"} next=${after.current.id}`,
       );
-    } catch (error) {
-      failures += 1;
-      console.error(`settle failed: ${String(error)}`);
+    } else if (fresh.current.ready_to_settle) {
+      await chain.callAs(config.settler, "begin_settle", {});
+      console.log(
+        `began settle for round ${fresh.current.id}; finalize on a later block`,
+      );
+    } else {
+      console.log("not ready to settle");
     }
-  } else {
-    console.log("not ready to settle");
+  } catch (error) {
+    failures += 1;
+    console.error(`settle step failed: ${String(error)}`);
   }
   return failures === 0 ? 0 : 1;
 }

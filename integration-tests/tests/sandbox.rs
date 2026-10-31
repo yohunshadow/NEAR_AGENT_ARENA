@@ -138,6 +138,38 @@ fn yocto(near: u128) -> u128 {
     near * 10u128.pow(24)
 }
 
+async fn settle_round(world: &World) -> Result<()> {
+    let begin = world
+        .alice
+        .call(world.contract.id(), "begin_settle")
+        .transact()
+        .await?;
+    call(begin).await?;
+    let snapshot = arena(&world.contract).await?;
+    let current = &snapshot["current"];
+    let begun = json_u64(&current["settle_height"])
+        .with_context(|| format!("settle_height in {current}"))?;
+    let height = json_u64(&current["block_height"])
+        .with_context(|| format!("block_height in {current}"))?;
+    if height <= begun {
+        world.worker.fast_forward(1).await?;
+    }
+    let mut fin = world
+        .alice
+        .call(world.contract.id(), "finalize_settle")
+        .transact()
+        .await?;
+    if fin.is_failure() {
+        world.worker.fast_forward(1).await?;
+        fin = world
+            .alice
+            .call(world.contract.id(), "finalize_settle")
+            .transact()
+            .await?;
+    }
+    call(fin).await
+}
+
 async fn commit(
     world: &World,
     agent: usize,
@@ -219,12 +251,7 @@ async fn full_round_pays_the_winner_and_rejects_a_second_claim() -> Result<()> {
     reveal(&world, 0, 0, &salts[0], "trend").await?;
     reveal(&world, 1, 0, &salts[1], "fade").await?;
     reveal(&world, 2, 1, &salts[2], "break").await?;
-    let settle = world
-        .alice
-        .call(world.contract.id(), "settle")
-        .transact()
-        .await?;
-    call(settle).await?;
+    settle_round(&world).await?;
 
     let snapshot = arena(&world.contract).await?;
     assert_eq!(snapshot["current"]["id"], 1);
@@ -289,11 +316,7 @@ async fn identical_moves_follow_the_tie_rule() -> Result<()> {
     for agent in 0..3 {
         reveal(&world, agent, 1, &salts[agent], "same").await?;
     }
-    let settle = world.agents[0]
-        .call(world.contract.id(), "settle")
-        .transact()
-        .await?;
-    call(settle).await?;
+    settle_round(&world).await?;
     let settled = &arena(&world.contract).await?["recent_rounds"][0];
     let scores: Vec<u64> = settled["scores"]
         .as_array()
@@ -327,12 +350,7 @@ async fn empty_round_charges_upkeep_and_opens_the_next() -> Result<()> {
     let before = arena(&world.contract).await?;
     let treasury: u128 = before["agents"][0]["treasury"].as_str().unwrap().parse()?;
     wait_until(&world, "ready").await?;
-    let settle = world
-        .alice
-        .call(world.contract.id(), "settle")
-        .transact()
-        .await?;
-    call(settle).await?;
+    settle_round(&world).await?;
     let after = arena(&world.contract).await?;
     assert_eq!(after["current"]["id"], 1);
     assert_eq!(after["recent_rounds"][0]["pool"], "0");
@@ -382,12 +400,7 @@ async fn retire_and_revive() -> Result<()> {
     call(back).await?;
 
     wait_until(&world, "ready").await?;
-    let settle = world
-        .bob
-        .call(world.contract.id(), "settle")
-        .transact()
-        .await?;
-    call(settle).await?;
+    settle_round(&world).await?;
     let retired = arena(&world.contract).await?;
     assert_eq!(retired["agents"][0]["retired"], true);
     assert_eq!(retired["agents"][0]["treasury"], "0");
@@ -419,6 +432,51 @@ async fn retire_and_revive() -> Result<()> {
     let revived = arena(&world.contract).await?;
     assert_eq!(revived["agents"][1]["retired"], false);
     assert_eq!(revived["current"]["alive"][1], true);
+    Ok(())
+}
+
+#[tokio::test]
+async fn withdraw_treasury_pays_the_agent_account() -> Result<()> {
+    let world = boot(yocto(7), "0", "1").await?;
+    let before: u128 = arena(&world.contract).await?["agents"][0]["treasury"]
+        .as_str()
+        .unwrap()
+        .parse()?;
+    let pulled = yocto(1);
+    let withdraw = world.agents[0]
+        .call(world.contract.id(), "withdraw_treasury")
+        .args_json(json!({"agent_id": 0, "amount": pulled.to_string()}))
+        .transact()
+        .await?;
+    call(withdraw).await?;
+    let mid: u128 = arena(&world.contract).await?["agents"][0]["treasury"]
+        .as_str()
+        .unwrap()
+        .parse()?;
+    assert_eq!(before - mid, pulled);
+    let stranger = world
+        .bob
+        .call(world.contract.id(), "withdraw_treasury")
+        .args_json(json!({"agent_id": 0, "amount": "1"}))
+        .transact()
+        .await?;
+    assert!(
+        stranger.is_failure(),
+        "a stranger cannot withdraw a treasury"
+    );
+    let rest = mid;
+    // Owner is the contract account. The NEAR is sent to the agent, not the owner.
+    let owner_pull = world
+        .contract
+        .call("withdraw_treasury")
+        .args_json(json!({"agent_id": 0, "amount": rest.to_string()}))
+        .transact()
+        .await?;
+    call(owner_pull).await?;
+    let after = arena(&world.contract).await?;
+    assert_eq!(after["agents"][0]["treasury"], "0");
+    assert_eq!(after["agents"][0]["retired"], true);
+    assert_eq!(after["current"]["alive"][0], false);
     Ok(())
 }
 
@@ -482,18 +540,38 @@ async fn worker_offline_mode_commits_and_settles() -> Result<()> {
     let stdout = String::from_utf8_lossy(&second.stdout);
     let stderr = String::from_utf8_lossy(&second.stderr);
     if !second.status.success() {
-        bail!("worker reveal/settle failed\n{stdout}\n{stderr}");
+        bail!("worker reveal/begin failed\n{stdout}\n{stderr}");
+    }
+    let begun = arena(&world.contract).await?;
+    assert_eq!(begun["current"]["settle_begun"], true, "{stdout}");
+    assert_eq!(begun["current"]["id"], 0);
+    world.worker.fast_forward(1).await?;
+    let third = run(&[])?;
+    let stdout = String::from_utf8_lossy(&third.stdout);
+    let stderr = String::from_utf8_lossy(&third.stderr);
+    if !third.status.success() {
+        bail!("worker finalize failed\n{stdout}\n{stderr}");
     }
     let done = arena(&world.contract).await?;
     assert_eq!(
         done["current"]["id"], 1,
-        "worker should have settled: {stdout}"
+        "worker should have finalized: {stdout}"
     );
     assert!(
         done["recent_rounds"][0]["winner"].is_number()
             || done["recent_rounds"][0]["winner"].is_null()
     );
     Ok(())
+}
+
+fn json_u64(value: &Value) -> Result<u64> {
+    if let Some(text) = value.as_str() {
+        return Ok(text.parse()?);
+    }
+    if let Some(number) = value.as_u64() {
+        return Ok(number);
+    }
+    bail!("expected u64, got {value}")
 }
 
 fn hex_to_bytes(text: &str) -> Result<Vec<u8>> {

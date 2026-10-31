@@ -1,7 +1,9 @@
 name: Agent tick
 
-# Free GitHub-hosted runner. Add the repository secrets named below to enable
-# it. Without CONTRACT_ID the job exits successfully and does nothing.
+# Free GitHub-hosted runner, every 10 minutes. The job is a no-op until a
+# maintainer adds either NEAR_AGENT_KEYS_JSON or the per-agent CONTRACT_ID
+# secrets. NEAR_AI_API_KEY is optional: without it the worker uses the offline
+# strategy. Do not put keys in the repository.
 on:
   schedule:
     - cron: "*/10 * * * *"
@@ -17,9 +19,13 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: agent/package-lock.json
-      - name: Install and tick
+      - name: Tick, or skip when secrets are absent
         working-directory: agent
         env:
+          NEAR_AGENT_KEYS_JSON: ${{ secrets.NEAR_AGENT_KEYS_JSON }}
+          NEAR_AI_API_KEY: ${{ secrets.NEAR_AI_API_KEY }}
+          NEAR_AI_BASE_URL: ${{ secrets.NEAR_AI_BASE_URL }}
+          NEAR_AI_MODEL: ${{ secrets.NEAR_AI_MODEL }}
           CONTRACT_ID: ${{ secrets.CONTRACT_ID }}
           NEAR_RPC_URL: ${{ secrets.NEAR_RPC_URL }}
           NEAR_NETWORK_ID: ${{ secrets.NEAR_NETWORK_ID }}
@@ -31,12 +37,9 @@ jobs:
           AGENT_2_PRIVATE_KEY: ${{ secrets.AGENT_2_PRIVATE_KEY }}
           SETTLER_ACCOUNT_ID: ${{ secrets.SETTLER_ACCOUNT_ID }}
           SETTLER_PRIVATE_KEY: ${{ secrets.SETTLER_PRIVATE_KEY }}
-          NEAR_AI_API_KEY: ${{ secrets.NEAR_AI_API_KEY }}
-          NEAR_AI_BASE_URL: ${{ secrets.NEAR_AI_BASE_URL }}
-          NEAR_AI_MODEL: ${{ secrets.NEAR_AI_MODEL }}
         run: |
-          if [ -z "$CONTRACT_ID" ]; then
-            echo "CONTRACT_ID is not set. Add testnet secrets to enable the cron tick."
+          if [ -z "${NEAR_AGENT_KEYS_JSON}" ] && [ -z "${CONTRACT_ID}" ]; then
+            echo "No worker secrets yet (NEAR_AGENT_KEYS_JSON or CONTRACT_ID). Skipping tick."
             exit 0
           fi
           npm ci

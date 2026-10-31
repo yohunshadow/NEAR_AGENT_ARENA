@@ -17,8 +17,9 @@ pub use game::{
 };
 
 use game::{
-    agent_index, apply_back, apply_commit, apply_fund, apply_reveal, apply_settle, initial_retired,
-    open_round, phase_of, ready_to_settle, start_next_round,
+    agent_index, apply_back, apply_commit, apply_fund, apply_reveal, apply_settle,
+    begin_settle as begin_round, finalize_guard, initial_retired, open_round, phase_of,
+    ready_to_settle, start_next_round,
 };
 use near_sdk::json_types::{U128, U64};
 use near_sdk::store::{LookupMap, Vector};
@@ -65,6 +66,10 @@ pub struct CurrentRoundView {
     pub id: u64,
     pub phase: String,
     pub ready_to_settle: bool,
+    pub ready_to_finalize: bool,
+    pub settle_begun: bool,
+    pub settle_height: Option<U64>,
+    pub block_height: U64,
     pub betting_end_ns: U64,
     pub reveal_end_ns: U64,
     pub pool: U128,
@@ -300,14 +305,36 @@ impl Contract {
         );
     }
 
-    /// Settle the current round and open the next one.
+    /// Lock the round for settlement in this block. Does not read the random seed.
     ///
-    /// Permissionless. Uses `env::random_seed()` from this transaction's block.
-    /// Succeeds once the reveal window has ended, or earlier once every alive
-    /// agent who committed has revealed (agents who never committed do not
-    /// block settlement).
-    pub fn settle(&mut self) {
+    /// Permissionless once the reveal window has ended, or earlier once every
+    /// alive agent who committed has revealed. A second call in a later block,
+    /// [`Self::finalize_settle`], reads `env::random_seed()`. The account that
+    /// begins settlement cannot choose that seed, because it belongs to a
+    /// future block.
+    pub fn begin_settle(&mut self) {
+        die(begin_round(
+            &mut self.econ.round,
+            env::block_timestamp(),
+            env::block_height(),
+        ));
+        emit(
+            "begin_settle",
+            &format!(
+                "{{\"round_id\":{},\"block_height\":{}}}",
+                self.econ.round.id,
+                self.econ.round.settle_height.unwrap_or(0)
+            ),
+        );
+    }
+
+    /// Score the round with this block's `env::random_seed()` and open the next one.
+    ///
+    /// Fails in the same block as `begin_settle`. Payouts stay on the claim
+    /// pattern: this call does not iterate backers.
+    pub fn finalize_settle(&mut self) {
         let now = env::block_timestamp();
+        die(finalize_guard(&self.econ.round, env::block_height()));
         let seed = env::random_seed_array();
         let settled = die(apply_settle(&mut self.econ, now, seed));
         let round_id = settled.id;
@@ -316,7 +343,7 @@ impl Contract {
         self.history.flush();
         start_next_round(&mut self.econ, now);
         emit(
-            "settle",
+            "finalize_settle",
             &format!(
                 "{{\"round_id\":{},\"winner\":{},\"next_round_id\":{}}}",
                 round_id,
@@ -326,6 +353,43 @@ impl Contract {
                 self.econ.round.id
             ),
         );
+    }
+
+    /// Send `amount` of an agent's treasury to that agent's own account.
+    ///
+    /// The predecessor must be the owner or that agent account. Paying the
+    /// treasury down to zero retires the agent. During an open betting window
+    /// they also leave the current round. Existing bets stay in the pool and
+    /// are still claimed individually.
+    pub fn withdraw_treasury(&mut self, agent_id: u8, amount: U128) -> Promise {
+        let idx = die(agent_index(agent_id));
+        let pred = env::predecessor_account_id();
+        let agent_account = self.agent_accounts[idx].clone();
+        require!(
+            pred == self.owner_id || pred == agent_account,
+            "owner or agent only"
+        );
+        let amount = amount.0;
+        require!(amount > 0, "amount is zero");
+        require!(amount <= self.econ.agents[idx].treasury, "exceeds treasury");
+        require!(amount <= liquid_balance(), "exceeds liquid balance");
+        self.econ.agents[idx].treasury -= amount;
+        if self.econ.agents[idx].treasury == 0 {
+            self.econ.agents[idx].retired = true;
+            if self.econ.round.settle_height.is_none()
+                && env::block_timestamp() < self.econ.round.betting_end_ns
+            {
+                self.econ.round.alive[idx] = false;
+            }
+        }
+        emit(
+            "withdraw_treasury",
+            &format!(
+                "{{\"agent_id\":{},\"to\":\"{}\",\"amount\":\"{}\",\"treasury\":\"{}\"}}",
+                agent_id, agent_account, amount, self.econ.agents[idx].treasury
+            ),
+        );
+        Promise::new(agent_account).transfer(NearToken::from_yoctonear(amount))
     }
 
     /// Pay the predecessor for `round_id`. Losers and double-claims panic, so a
@@ -504,11 +568,17 @@ impl Contract {
 
     fn current_view(&self) -> CurrentRoundView {
         let now = env::block_timestamp();
+        let height = env::block_height();
         let round = &self.econ.round;
+        let begun = round.settle_height;
         CurrentRoundView {
             id: round.id,
             phase: phase_of(round, now).to_string(),
-            ready_to_settle: ready_to_settle(round, now),
+            ready_to_settle: begun.is_none() && ready_to_settle(round, now),
+            ready_to_finalize: begun.is_some_and(|started| height > started),
+            settle_begun: begun.is_some(),
+            settle_height: begun.map(U64),
+            block_height: U64(height),
             betting_end_ns: U64(round.betting_end_ns),
             reveal_end_ns: U64(round.reveal_end_ns),
             pool: U128(round.pool),
@@ -733,6 +803,21 @@ mod contract_tests {
         encode_hex(&hash)
     }
 
+    fn finish_round(contract: &mut Contract, now: u64, seed: [u8; 32]) {
+        testing_env!(context("settler.test.near", 0, now, [9u8; 32])
+            .block_height(10)
+            .build());
+        contract.begin_settle();
+        let same_block = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            contract.finalize_settle();
+        }));
+        assert!(same_block.is_err(), "same-block finalize must fail");
+        testing_env!(context("settler.test.near", 0, now, seed)
+            .block_height(11)
+            .build());
+        contract.finalize_settle();
+    }
+
     #[test]
     fn contract_round_claim_tie_and_rejects_outsiders() {
         testing_env!(context("owner.test.near", near_to_yocto(7), 1_000, [0u8; 32]).build());
@@ -781,8 +866,7 @@ mod contract_tests {
         let mut seed = [0u8; 32];
         seed[0] = 255;
         seed[1] = 255;
-        testing_env!(context("settler.test.near", 0, 7_100, seed).build());
-        contract.settle();
+        finish_round(&mut contract, 7_100, seed);
         let arena = contract.get_arena();
         assert_eq!(arena.current.id, 1);
         assert_eq!(arena.current.phase, "betting");
@@ -817,8 +901,7 @@ mod contract_tests {
             testing_env!(context(names[i], 0, 13_000, [0u8; 32]).build());
             contract.reveal(U64(1), 1, encode_hex(&salts[i]), "same".to_string());
         }
-        testing_env!(context("settler.test.near", 0, 13_100, [0u8; 32]).build());
-        contract.settle();
+        finish_round(&mut contract, 13_100, [0u8; 32]);
         let tied = contract.get_settled_round(U64(1)).expect("tie round");
         assert_eq!(tied.scores, vec![Some(512), Some(512), Some(512)]);
         assert_eq!(tied.winner, Some(0));
@@ -849,8 +932,7 @@ mod contract_tests {
         testing_env!(context("alice.test.near", near_to_yocto(1), 1_200, [0u8; 32]).build());
         contract.back_agent(0);
 
-        testing_env!(context("settler.test.near", 0, 4_000, [0u8; 32]).build());
-        contract.settle();
+        finish_round(&mut contract, 4_000, [0u8; 32]);
         let settled = contract.get_settled_round(U64(0)).expect("empty-ish round");
         assert_eq!(settled.winner, None);
         assert!(settled.refund);
@@ -870,5 +952,94 @@ mod contract_tests {
         contract.fund_agent(0);
         assert!(!contract.get_agents()[0].retired);
         assert!(contract.get_current_round().alive[0]);
+    }
+
+    #[test]
+    fn finalize_uses_the_later_blocks_seed() {
+        testing_env!(context("owner.test.near", near_to_yocto(7), 1_000, [0u8; 32]).build());
+        let mut contract = Contract::new(
+            account("owner.test.near"),
+            agents(),
+            U64(1_000),
+            U64(1_000),
+            U128(0),
+            500,
+            U128(1),
+        );
+        let salts = [[4u8; 32], [5u8; 32], [6u8; 32]];
+        let names = [
+            "momentum.arena.test.near",
+            "mean.arena.test.near",
+            "breakout.arena.test.near",
+        ];
+        for i in 0..3 {
+            testing_env!(context(names[i], 0, 1_100, [0u8; 32]).build());
+            contract.commit(U64(0), commit_hex(1, &salts[i], "same"));
+        }
+        for i in 0..3 {
+            testing_env!(context(names[i], 0, 2_200, [0u8; 32]).build());
+            contract.reveal(U64(0), 1, encode_hex(&salts[i]), "same".to_string());
+        }
+        // Begin under a seed that would pick agent 0. Finalize under a seed
+        // whose third byte wins the tie.
+        testing_env!(context("settler.test.near", 0, 2_300, [0u8; 32])
+            .block_height(4)
+            .build());
+        contract.begin_settle();
+        assert_eq!(contract.get_current_round().phase, "finalize");
+        assert!(!contract.get_current_round().ready_to_finalize);
+        let mut later = [0u8; 32];
+        later[2] = 9;
+        testing_env!(context("settler.test.near", 0, 2_300, later)
+            .block_height(5)
+            .build());
+        assert!(contract.get_current_round().ready_to_finalize);
+        contract.finalize_settle();
+        let settled = contract.get_settled_round(U64(0)).expect("settled");
+        assert_eq!(settled.winner, Some(2));
+        assert_eq!(settled.seed_hex.as_bytes()[4], b'0');
+        assert!(settled.seed_hex.starts_with("000009") || settled.entropies[2] == Some(9));
+        assert_eq!(settled.entropies[2], Some(9));
+    }
+
+    #[test]
+    fn owner_or_agent_can_withdraw_treasury_to_the_agent() {
+        testing_env!(context("owner.test.near", near_to_yocto(7), 1_000, [0u8; 32]).build());
+        let mut contract = Contract::new(
+            account("owner.test.near"),
+            agents(),
+            U64(5_000),
+            U64(5_000),
+            U128(near_to_yocto(1)),
+            500,
+            U128(1),
+        );
+        let before = contract.get_agents()[0].treasury.0;
+        testing_env!(context("momentum.arena.test.near", 0, 1_200, [0u8; 32]).build());
+        let _ = contract.withdraw_treasury(0, U128(near_to_yocto(1)));
+        assert_eq!(
+            contract.get_agents()[0].treasury.0,
+            before - near_to_yocto(1)
+        );
+        let receipts = format!("{:?}", near_sdk::test_utils::get_created_receipts());
+        assert!(receipts.contains("momentum.arena.test.near"));
+        assert!(receipts.contains("Transfer"));
+
+        testing_env!(context("alice.test.near", 0, 1_300, [0u8; 32]).build());
+        let stranger = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = contract.withdraw_treasury(0, U128(1));
+        }));
+        assert!(stranger.is_err());
+
+        testing_env!(context("owner.test.near", 0, 1_400, [0u8; 32]).build());
+        let rest = contract.get_agents()[0].treasury.0;
+        let _ = contract.withdraw_treasury(0, U128(rest));
+        assert_eq!(contract.get_agents()[0].treasury.0, 0);
+        assert!(contract.get_agents()[0].retired);
+        assert!(!contract.get_current_round().alive[0]);
+        let backed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            contract.back_agent(0);
+        }));
+        assert!(backed.is_err());
     }
 }

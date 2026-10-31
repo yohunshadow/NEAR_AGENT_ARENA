@@ -12,8 +12,12 @@ export interface AgentView {
 
 export interface CurrentRound {
   id: number;
-  phase: "betting" | "reveal" | "settle" | string;
+  phase: "betting" | "reveal" | "settle" | "finalize" | string;
   ready_to_settle: boolean;
+  ready_to_finalize: boolean;
+  settle_begun: boolean;
+  settle_height: string | null;
+  block_height: string;
   betting_end_ns: string;
   reveal_end_ns: string;
   pool: string;
