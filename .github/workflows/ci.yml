@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Install OpenSSL for near-workspaces
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
+      - uses: Swatinem/rust-cache@v2
+      - name: Contract unit tests
+        run: cargo test -p near-agent-arena --lib
+      - name: Build on-chain wasm
+        run: ./scripts/build-wasm.sh
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: agent/package-lock.json
+      - name: Build the worker used by the sandbox test
+        working-directory: agent
+        run: npm ci && npm test && npm run build
+      - name: Sandbox integration tests
+        run: cargo test -p integration-tests -- --test-threads=1
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Build the Next.js app
+        working-directory: web
+        run: npm ci && npm run build
