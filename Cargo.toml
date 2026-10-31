@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = ["contract", "integration-tests"]
+
+[profile.release]
+codegen-units = 1
+opt-level = "z"
+lto = true
+overflow-checks = true
+panic = "abort"
+strip = "symbols"

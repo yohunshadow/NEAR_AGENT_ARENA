@@ -1,0 +1,15 @@
+/target/
+**/*.wasm
+!contract/res/near_agent_arena.wasm
+node_modules/
+.next/
+dist/
+.env
+.env.local
+.env.*.local
+agent/.state/
+*.log
+.DS_Store
+coverage/
+.vercel
+out/
