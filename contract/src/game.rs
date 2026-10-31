@@ -50,7 +50,22 @@ pub const STORAGE_BYTE_COST: u128 = 10_000_000_000_000_000_000;
 /// NEAR withheld from the init deposit so round history can grow without
 /// spending an agent's treasury. One NEAR covers on the order of 100 rounds.
 pub const STATE_BUFFER: u128 = 1_000_000_000_000_000_000_000_000;
-pub const VERSION: &str = "0.1.0";
+/// 0.0005 NEAR per alive agent per round.
+///
+/// A 1 NEAR treasury at a 30-minute round lasts 2000 rounds, about 41 days,
+/// which covers a demo that has to stay funded through 25 November 2026.
+/// 0.0005 NEAR is still visible at 4 decimal places (0.024 NEAR per agent per day).
+pub const DEFAULT_UPKEEP: u128 = 500_000_000_000_000_000_000;
+/// Owner setters refuse an upkeep above 1 NEAR.
+pub const MAX_UPKEEP: u128 = 1_000_000_000_000_000_000_000_000;
+/// Owner setters refuse a winner fee above 20%. Init still allows up to 100%.
+pub const MAX_FEE_BPS: u16 = 2_000;
+/// Owner setters: shortest betting or reveal window.
+pub const MIN_DURATION_NS: u64 = 60_000_000_000;
+/// Owner setters: longest betting or reveal window (24 hours).
+pub const MAX_DURATION_NS: u64 = 86_400_000_000_000;
+pub const SCHEMA_VERSION: u32 = 2;
+pub const VERSION: &str = "0.2.0";
 
 #[near(serializers = [borsh])]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -89,6 +104,10 @@ pub struct LiveRound {
     /// Block height of `begin_settle`. `finalize_settle` must be a later block
     /// so the settler cannot choose `env::random_seed()`.
     pub settle_height: Option<u64>,
+    /// Copied from `Economics` when the round opens. Owner setters change the
+    /// economics used by the *next* round and leave this snapshot alone.
+    pub upkeep_this_round: u128,
+    pub fee_bps_this_round: u16,
 }
 
 #[near(serializers = [borsh])]
@@ -226,6 +245,8 @@ pub fn open_round(
     betting_ns: u64,
     reveal_ns: u64,
     alive: [bool; 3],
+    upkeep: u128,
+    fee_bps: u16,
 ) -> LiveRound {
     let betting_end_ns = now.saturating_add(betting_ns);
     LiveRound {
@@ -239,6 +260,8 @@ pub fn open_round(
         moves: [None, None, None],
         reasonings: [None, None, None],
         settle_height: None,
+        upkeep_this_round: upkeep,
+        fee_bps_this_round: fee_bps,
     }
 }
 
@@ -473,7 +496,7 @@ pub fn apply_settle(
             (pool, 0, false)
         } else {
             let fee = pool
-                .checked_mul(u128::from(econ.winner_fee_bps))
+                .checked_mul(u128::from(econ.round.fee_bps_this_round))
                 .ok_or("fee overflow")?
                 / FEE_DENOM;
             let distributable = pool - fee;
@@ -498,7 +521,7 @@ pub fn apply_settle(
         }
         econ.agents[i].rounds_fought = econ.agents[i].rounds_fought.saturating_add(1);
         let treasury = econ.agents[i].treasury;
-        let charged = treasury.min(econ.upkeep);
+        let charged = treasury.min(econ.round.upkeep_this_round);
         econ.agents[i].treasury = treasury - charged;
         econ.agents[i].upkeep_paid = econ.agents[i]
             .upkeep_paid
@@ -653,6 +676,8 @@ pub fn start_next_round(econ: &mut Economics, now: u64) {
         econ.betting_duration_ns,
         econ.reveal_duration_ns,
         alive,
+        econ.upkeep,
+        econ.winner_fee_bps,
     );
 }
 
@@ -682,7 +707,7 @@ mod tests {
         let alive = [!agents[0].retired, !agents[1].retired, !agents[2].retired];
         Economics {
             agents,
-            round: open_round(0, 1_000, 500, 500, alive),
+            round: open_round(0, 1_000, 500, 500, alive, upkeep, 500),
             protocol_treasury: 0,
             upkeep,
             winner_fee_bps: 500,
@@ -1071,7 +1096,7 @@ mod tests {
 
     #[test]
     fn bad_reveal_does_not_stick() {
-        let mut round = open_round(0, 0, 100, 100, [true, false, false]);
+        let mut round = open_round(0, 0, 100, 100, [true, false, false], 0, 500);
         let salt = [6u8; 32];
         let commitment = digest(0, &salt, "ok");
         apply_commit(&mut round, 0, 0, commitment, 10).unwrap();
@@ -1087,7 +1112,7 @@ mod tests {
 
     #[test]
     fn rejects_double_commit_and_closed_betting() {
-        let mut round = open_round(3, 0, 100, 100, [true, true, true]);
+        let mut round = open_round(3, 0, 100, 100, [true, true, true], 0, 500);
         apply_commit(&mut round, 0, 3, [1u8; 32], 10).unwrap();
         assert_eq!(
             apply_commit(&mut round, 0, 3, [2u8; 32], 11).unwrap_err(),

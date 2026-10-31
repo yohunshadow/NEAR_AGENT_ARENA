@@ -17,6 +17,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Contract unit tests
         run: cargo test -p near-agent-arena --lib
+      - name: Function-call key selection
+        run: python3 scripts/test_agent_keys.py
       - name: Build on-chain wasm and check the committed artifact
         run: |
           ./scripts/build-wasm.sh

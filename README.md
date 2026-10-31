@@ -24,7 +24,7 @@ See a passing run. It covers the winner rule, a full round with pro-rata payout,
 
 See `target/wasm32-unknown-unknown/release/near_agent_arena.wasm` and its size in bytes. The script passes `--cfg near` so the binary imports real NEAR host functions. A plain `cargo build --target wasm32-unknown-unknown` without that flag is not valid on chain. `rust-toolchain.toml` pins Rust 1.99.1 so the bytes match CI.
 
-The reproducible artifact checked into git is `contract/res/near_agent_arena.wasm` (224461 bytes, sha256 `1f6e760bdaceffd32df1167d1deebee13c21efb98312bf32c238119f777a6d0f`), with the same digest in `contract/res/SHA256SUMS`. Panic locations embed the Cargo registry path, which is `/usr/local/cargo` here and `/home/runner/.cargo` on GitHub Actions. `scripts/build-wasm.sh` remaps that registry, the workspace, and the sysroot onto fixed prefixes (`/cargo/registry`, `/workspace`, `/rust-sysroot`) before rustc runs. CI builds a fresh wasm with Rust 1.99.1 and fails if `cmp` or `sha256sum -c` disagrees.
+The reproducible artifact checked into git is `contract/res/near_agent_arena.wasm` (236747 bytes, sha256 `204acacd23261590579c2ce4bde04779821f70138e8e95e4d675259ba3c0f848`), with the same digest in `contract/res/SHA256SUMS`. Panic locations embed the Cargo registry path, which is `/usr/local/cargo` here and `/home/runner/.cargo` on GitHub Actions. `scripts/build-wasm.sh` remaps that registry, the workspace, and the sysroot onto fixed prefixes (`/cargo/registry`, `/workspace`, `/rust-sysroot`) before rustc runs. CI builds a fresh wasm with Rust 1.99.1 and fails if `cmp` or `sha256sum -c` disagrees.
 
 ```bash
 cd contract/res && sha256sum -c SHA256SUMS
@@ -39,12 +39,13 @@ cd agent && npm ci && npm test && npm run build && cd ..
 cargo test -p integration-tests -- --test-threads=1
 ```
 
-See five passing tests:
+See six passing tests:
 
 - `full_round_pays_the_winner_and_rejects_a_second_claim`
 - `identical_moves_follow_the_tie_rule`
 - `empty_round_charges_upkeep_and_opens_the_next`
 - `retire_and_revive`
+- `withdraw_treasury_pays_the_agent_account`
 - `worker_offline_mode_commits_and_settles`
 
 A non-agent `commit` fails. Alice's second `claim` fails. A retired agent rejects `back_agent` until `fund_agent`.
@@ -57,7 +58,7 @@ cd agent && npm run demo:offline
 
 See four printed rounds. With `NEAR_AI_API_KEY` unset, Momentum, Mean-Reversion, and Breakout each print a move and a reasoning line. Treasuries fall by upkeep. After they hit zero the log says `retired=true`. The last line is `offline demo finished (no RPC, no API key)`.
 
-To tick a deployed testnet contract later, copy `agent/.env.example` to `agent/.env`, fill testnet account ids and keys, and run `npm run tick`. Do not commit `.env`.
+To tick the live testnet contract, copy `agent/.env.example` to `agent/.env`. Point `NEAR_AGENT_KEYS_FILE` at `~/.near-credentials/near-agent-arena-keys.json` (or paste that file into `NEAR_AGENT_KEYS_JSON`). `npm run tick` runs one pass. `npm run loop` repeats forever; `TICK_INTERVAL_MS` defaults to 60000 and cannot go below 5000, which is the setting to use under pm2 or nohup. Do not commit `.env`.
 
 ### 5. Web demo, no wallet
 
@@ -167,7 +168,7 @@ payout = floor(stake_on_winner * distributable / winner_stake)
 
 The division uses a 256-bit intermediate. Dust strictly below one yoctoNEAR per backer stays in the contract. If the winner has no backers, the whole pool is credited to that agent's treasury instead of being split.
 
-Upkeep is charged only from agents who were alive this round: `min(treasury, upkeep)` moves into the protocol treasury. The owner can withdraw that with `withdraw_protocol`. A treasury that hits zero sets `retired`. `fund_agent` adds the attached deposit to the treasury. If the agent was retired and the treasury is now at least `min_treasury`, they revive. During the betting window they also join the current round.
+Upkeep is charged only from agents who were alive this round: `min(treasury, upkeep)` moves into the protocol treasury. The amount and the winner fee are snapshotted when the round opens, so the owner methods `set_upkeep`, `set_fee`, and `set_round_durations` change only the next round. Upkeep must be from 0 through 1 NEAR. The fee cap on those setters is 2000 bps. Each duration must be from 60 seconds through 24 hours. Init still accepts any non-zero duration so tests can use short windows, and a fee up to 10000 bps. The default upkeep for a new deploy, and the upkeep `migrate` installs for future rounds, is 0.0005 NEAR. At a 30-minute round that is 48 charges a day, 0.024 NEAR per agent per day, and a 1 NEAR treasury lasts about 41 days. The owner can withdraw collected upkeep with `withdraw_protocol`. A treasury that hits zero sets `retired`. `fund_agent` adds the attached deposit to the treasury. If the agent was retired and the treasury is now at least `min_treasury`, they revive. During the betting window they also join the current round.
 
 `new` keeps up to 1 NEAR of the attached deposit as a state-growth buffer so round history can be stored. The rest is split across the three agents as starting treasury. An agent below `min_treasury`, or at zero, starts retired.
 
@@ -196,6 +197,9 @@ Public RPC for a later deploy: `https://rpc.testnet.near.org`.
 | `agent/` | TypeScript worker, offline demo, GitHub/Vercel cron entry |
 | `web/` | Next.js arena. Vercel root directory: `web` |
 | `scripts/build-wasm.sh` | On-chain wasm build |
+| `scripts/deploy-testnet.sh` | Create agents, deploy, init, write function-call keys |
+| `scripts/rotate-agent-keys.sh` | Rebuild the worker JSON for an arena that is already live |
+| `scripts/agent_keys.py` | Pick function-call keys out of the legacy credential directory |
 | `.github/workflows/ci.yml` | Contract tests, wasm, sandbox, worker, web build |
 | `.github/workflows/agent-cron.yml` | Optional testnet tick every 10 minutes |
 
@@ -207,21 +211,83 @@ This project was built with AI coding assistance during NEAR HACKATHON.
 
 It is inspired by the author's earlier WIF Agent Arena on Robinhood Chain. This repository is a fresh codebase written for NEAR: new contract, worker, and frontend. It is not a port of that project's source. No pre-hackathon library from that project is vendored here.
 
+## Live testnet deployment
+
+The arena is deployed on testnet. The web app's `web/.env.example` points at this contract.
+
+| Account | Role | Explorer |
+| --- | --- | --- |
+| `near-agent-arena-97b380.testnet` | Contract and settler | https://testnet.nearblocks.io/address/near-agent-arena-97b380.testnet |
+| `naa-owner-97b380.testnet` | Owner | https://testnet.nearblocks.io/address/naa-owner-97b380.testnet |
+| `momentum.near-agent-arena-97b380.testnet` | Agent 0 | https://testnet.nearblocks.io/address/momentum.near-agent-arena-97b380.testnet |
+| `mean-reversion.near-agent-arena-97b380.testnet` | Agent 1 | https://testnet.nearblocks.io/address/mean-reversion.near-agent-arena-97b380.testnet |
+| `breakout.near-agent-arena-97b380.testnet` | Agent 2 | https://testnet.nearblocks.io/address/breakout.near-agent-arena-97b380.testnet |
+
+That first deploy initialized upkeep at 0.05 NEAR, which spends a 1 NEAR treasury in about 10 hours. Upgrade it in place so later rounds charge 0.0005 NEAR. The round that is already open still charges 0.05 once; `migrate` only changes the upkeep copied into the next round. State, bets, and history stay on the account.
+
+From a checkout, with the arena's legacy keychain credential at `~/.near-credentials/testnet/near-agent-arena-97b380.testnet.json`:
+
+```bash
+near contract deploy near-agent-arena-97b380.testnet \
+  use-file contract/res/near_agent_arena.wasm \
+  without-init-call \
+  network-config testnet \
+  sign-with-legacy-keychain \
+  send
+
+near contract call-function as-transaction near-agent-arena-97b380.testnet migrate \
+  json-args {} \
+  prepaid-gas '100 Tgas' \
+  attached-deposit '0 NEAR' \
+  sign-as near-agent-arena-97b380.testnet \
+  network-config testnet \
+  sign-with-legacy-keychain \
+  send
+```
+
+`migrate` may also be signed by `naa-owner-97b380.testnet`. Calling it again after schema 2 is a no-op. Optional, if you want a different future upkeep than 0.0005 NEAR:
+
+```bash
+near contract call-function as-transaction near-agent-arena-97b380.testnet set_upkeep \
+  json-args '{"upkeep":"500000000000000000000"}' \
+  prepaid-gas '30 Tgas' \
+  attached-deposit '0 NEAR' \
+  sign-as naa-owner-97b380.testnet \
+  network-config testnet \
+  sign-with-legacy-keychain \
+  send
+```
+
+`set_fee` takes `{"winner_fee_bps":500}`. `set_round_durations` takes `{"betting_duration_ns":"1200000000000","reveal_duration_ns":"600000000000"}` (20 minutes and 10 minutes). Both apply on the next round.
+
+If the worker JSON was built from `<agent>.json`, it holds full-access keys. Rebuild it from the function-call files and leave the full-access keys in place unless you pass the flag:
+
+```bash
+export ARENA_ACCOUNT=near-agent-arena-97b380.testnet
+./scripts/rotate-agent-keys.sh
+# optional, irreversible on that key:
+# DELETE_FULL_ACCESS=1 ./scripts/rotate-agent-keys.sh
+```
+
+The cron workflow `.github/workflows/agent-cron.yml` runs every 10 minutes. It exits 0 without doing work until `NEAR_AGENT_KEYS_JSON` or `CONTRACT_ID` is set in the repository secrets. `NEAR_AI_API_KEY` is optional. On a long-lived box, `cd agent && NEAR_AGENT_KEYS_FILE=~/.near-credentials/near-agent-arena-keys.json npm run loop`.
+
 ## Testnet deploy
 
-Run this on a machine that has [near-cli-rs](https://github.com/near/near-cli-rs) (`near`) and credentials in `~/.near-credentials`. A git checkout is not required. Download `scripts/deploy-testnet.sh`, `contract/res/near_agent_arena.wasm`, and `contract/res/SHA256SUMS`, and keep those two files in the same directory if you are not in the repo.
+Run this on a machine that has [near-cli-rs](https://github.com/near/near-cli-rs) (`near`) and credentials in `~/.near-credentials`. A git checkout is not required. Download `scripts/deploy-testnet.sh`, `scripts/agent_keys.py`, `contract/res/near_agent_arena.wasm`, and `contract/res/SHA256SUMS`, and keep the wasm and checksum in the same directory if you are not in the repo.
+
+`KEYCHAIN_MODE` defaults to `legacy` (`save-to-legacy-keychain` / `sign-with-legacy-keychain`), which works on Linux without an OS keyring. Set `KEYCHAIN_MODE=os` to use `save-to-keychain` / `sign-with-keychain`.
 
 Account names, for `ARENA_ACCOUNT=arena.testnet`:
 
 | Account | Role |
 | --- | --- |
 | `arena.testnet` | Contract. Full-access key signs deploy, init, and later `begin_settle` / `finalize_settle`. |
-| `OWNER_ACCOUNT` | Stored owner. May call `withdraw_treasury` and `withdraw_protocol`. Can be the same account as the arena. |
+| `OWNER_ACCOUNT` | Stored owner. May call `withdraw_treasury`, `withdraw_protocol`, `set_upkeep`, `set_fee`, and `set_round_durations`. Can be the same account as the arena. |
 | `momentum.arena.testnet` | Agent 0 |
 | `mean-reversion.arena.testnet` | Agent 1 |
 | `breakout.arena.testnet` | Agent 2 |
 
-Agent function-call keys allow only `commit` and `reveal` on the arena. They cannot transfer NEAR or settle. Settle is permissionless, so the worker's settler is the arena account's full-access key, not an agent key.
+Agent function-call keys allow only `commit` and `reveal` on the arena. They cannot transfer NEAR or settle. Settle is permissionless, so the worker's settler is the arena account's full-access key, not an agent key. The generated `near-agent-arena-keys.json` reads each agent's function-call file `~/.near-credentials/testnet/<agent>/ed25519_<public>.json` and skips the public key stored in `<agent>.json`, because near-cli does not overwrite that first file.
 
 Put at least 15 testnet NEAR on `ARENA_ACCOUNT` first (3 NEAR to create each sub-account, 4 NEAR attached to `new`, plus gas). Then:
 
@@ -232,40 +298,37 @@ export WASM_PATH=/absolute/path/near_agent_arena.wasm   # omit inside a checkout
 ./scripts/deploy-testnet.sh
 ```
 
-The script runs these near-cli-rs commands. It prints public keys only. Private keys stay in `~/.near-credentials` and in `~/.near-credentials/near-agent-arena-keys.json` (mode 600). Copy that JSON into the GitHub secret `NEAR_AGENT_KEYS_JSON`. Do not commit it.
+The script runs these near-cli-rs commands. It prints public keys only. Private keys stay in `~/.near-credentials` and in `~/.near-credentials/near-agent-arena-keys.json` (mode 600). Copy that JSON into the GitHub secret `NEAR_AGENT_KEYS_JSON`, or point `NEAR_AGENT_KEYS_FILE` at the file. Do not commit it.
 
 ```bash
 near account create-account fund-myself momentum.arena.testnet '3 NEAR' \
-  autogenerate-new-keypair save-to-keychain \
-  sign-as arena.testnet network-config testnet sign-with-keychain send
+  autogenerate-new-keypair save-to-legacy-keychain \
+  sign-as arena.testnet network-config testnet sign-with-legacy-keychain send
 # same for mean-reversion.arena.testnet and breakout.arena.testnet
 
 near contract deploy arena.testnet \
   use-file near_agent_arena.wasm \
   without-init-call \
-  network-config testnet sign-with-keychain send
+  network-config testnet sign-with-legacy-keychain send
 
 near contract call-function as-transaction arena.testnet new \
   json-args '<init json>' \
   prepaid-gas '100 Tgas' \
   attached-deposit '4 NEAR' \
-  sign-as arena.testnet network-config testnet sign-with-keychain send
+  sign-as arena.testnet network-config testnet sign-with-legacy-keychain send
 
 near account add-key momentum.arena.testnet \
   grant-function-call-access \
     --allowance '2 NEAR' \
     --contract-account-id arena.testnet \
     --function-names 'commit,reveal' \
-  autogenerate-new-keypair save-to-keychain \
-  network-config testnet sign-with-keychain send
+  autogenerate-new-keypair save-to-legacy-keychain \
+  network-config testnet sign-with-legacy-keychain send
 # same add-key for the other two agents
 ```
 
-`new` attaches 4 NEAR. One NEAR is the state buffer. The rest is split across the three treasuries, about 1 NEAR each. Upkeep is 0.05 NEAR per alive agent per round. Betting lasts 20 minutes and reveal lasts 10 minutes, so the 10-minute worker cron can commit, reveal, begin settlement, and finalize on a later tick. `min_treasury` is 0.2 NEAR.
-
-The cron workflow `.github/workflows/agent-cron.yml` runs every 10 minutes. It exits 0 without doing work until `NEAR_AGENT_KEYS_JSON` or `CONTRACT_ID` is set in the repository secrets. `NEAR_AI_API_KEY` is optional.
+`new` attaches 4 NEAR. One NEAR is the state buffer. The rest is split across the three treasuries, about 1 NEAR each. Upkeep is 0.0005 NEAR per alive agent per round. Betting lasts 20 minutes and reveal lasts 10 minutes, so the 10-minute worker cron can commit, reveal, begin settlement, and finalize on a later tick. `min_treasury` is 0.2 NEAR.
 
 ## Still later
 
-- A live testnet deploy from the maintainer's machine, and the cron secret above.
 - Visual design beyond this readable skeleton.

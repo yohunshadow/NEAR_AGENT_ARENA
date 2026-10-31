@@ -12,8 +12,10 @@ mod game;
 
 pub use game::{
     beats, claimable, decide, move_name, mul_div_floor, preimage, validate_reveal, AgentState,
-    Decision, Economics, LiveRound, SettledRound, UserBet, FEE_DENOM, MAX_REASONING_BYTES,
-    MOVE_AGGRESSIVE, MOVE_BALANCED, MOVE_DEFENSIVE, STATE_BUFFER, STORAGE_BYTE_COST, VERSION,
+    Decision, Economics, LiveRound, SettledRound, UserBet, DEFAULT_UPKEEP, FEE_DENOM,
+    MAX_DURATION_NS, MAX_FEE_BPS, MAX_REASONING_BYTES, MAX_UPKEEP, MIN_DURATION_NS,
+    MOVE_AGGRESSIVE, MOVE_BALANCED, MOVE_DEFENSIVE, SCHEMA_VERSION, STATE_BUFFER,
+    STORAGE_BYTE_COST, VERSION,
 };
 
 use game::{
@@ -21,13 +23,18 @@ use game::{
     begin_settle as begin_round, finalize_guard, initial_retired, open_round, phase_of,
     ready_to_settle, start_next_round,
 };
+use near_sdk::borsh::BorshDeserialize;
+
+mod state_v1;
+
 use near_sdk::json_types::{U128, U64};
 use near_sdk::store::{LookupMap, Vector};
 use near_sdk::{env, near, require, AccountId, NearToken, PanicOnDefault, Promise};
+use state_v1::ContractV1;
 
 #[near(serializers = [borsh])]
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct BetKey {
+pub(crate) struct BetKey {
     round_id: u64,
     account_id: AccountId,
 }
@@ -131,6 +138,9 @@ pub struct Contract {
     econ: Economics,
     history: Vector<SettledRound>,
     bets: LookupMap<BetKey, UserBet>,
+    /// Appended so schema-1 bytes fail to decode as this struct. `migrate`
+    /// rewrites stored state to this version.
+    schema_version: u32,
 }
 
 #[near]
@@ -202,7 +212,15 @@ impl Contract {
         let now = env::block_timestamp();
         let econ = Economics {
             agents: agent_states,
-            round: open_round(0, now, betting_duration_ns.0, reveal_duration_ns.0, alive),
+            round: open_round(
+                0,
+                now,
+                betting_duration_ns.0,
+                reveal_duration_ns.0,
+                alive,
+                upkeep.0,
+                winner_fee_bps,
+            ),
             protocol_treasury: 0,
             upkeep: upkeep.0,
             winner_fee_bps,
@@ -217,7 +235,59 @@ impl Contract {
             econ,
             history: Vector::new(b"h"),
             bets: LookupMap::new(b"b"),
+            schema_version: SCHEMA_VERSION,
         }
+    }
+
+    /// Upgrade state written by schema 1 (the first testnet deploy) in place.
+    ///
+    /// Callable by this contract account (the signer of `near contract deploy`)
+    /// or by the stored owner. A second call is a no-op once `schema_version`
+    /// is already 2. The round in progress keeps the upkeep and fee it opened
+    /// with. Later rounds use [`DEFAULT_UPKEEP`] (0.0005 NEAR) unless the owner
+    /// calls [`Self::set_upkeep`]. History and bets stay under the same
+    /// storage prefixes.
+    #[init(ignore_state)]
+    pub fn migrate() -> Self {
+        let raw = env::storage_read(b"STATE").unwrap_or_else(|| env::panic_str("no state"));
+        if let Ok(current) = Self::try_from_slice(&raw) {
+            if current.schema_version == SCHEMA_VERSION {
+                authorize_migrate(&current.owner_id);
+                return current;
+            }
+        }
+        let old = ContractV1::try_from_slice(&raw)
+            .unwrap_or_else(|_| env::panic_str("unrecognized state"));
+        authorize_migrate(&old.owner_id);
+        contract_from_v1(old)
+    }
+
+    /// Upkeep charged to each alive agent, starting with the next round.
+    /// `0` is allowed. The cap is 1 NEAR.
+    pub fn set_upkeep(&mut self, upkeep: U128) {
+        assert_owner_of(&self.owner_id);
+        require!(upkeep.0 <= MAX_UPKEEP, "upkeep must be <= 1 NEAR");
+        self.econ.upkeep = upkeep.0;
+    }
+
+    /// Winner fee in basis points, starting with the next round. Cap is 2000 (20%).
+    pub fn set_fee(&mut self, winner_fee_bps: u16) {
+        assert_owner_of(&self.owner_id);
+        require!(winner_fee_bps <= MAX_FEE_BPS, "fee bps must be <= 2000");
+        self.econ.winner_fee_bps = winner_fee_bps;
+    }
+
+    /// Betting and reveal windows, starting with the next round.
+    /// Each duration must be from 60 seconds through 24 hours.
+    pub fn set_round_durations(&mut self, betting_duration_ns: U64, reveal_duration_ns: U64) {
+        assert_owner_of(&self.owner_id);
+        require!(
+            (MIN_DURATION_NS..=MAX_DURATION_NS).contains(&betting_duration_ns.0)
+                && (MIN_DURATION_NS..=MAX_DURATION_NS).contains(&reveal_duration_ns.0),
+            "durations must be between 60 seconds and 24 hours"
+        );
+        self.econ.betting_duration_ns = betting_duration_ns.0;
+        self.econ.reveal_duration_ns = reveal_duration_ns.0;
     }
 
     /// Back `agent_id` with the attached deposit. Storage growth is paid out of
@@ -632,6 +702,55 @@ fn settled_view(round: &SettledRound) -> SettledRoundView {
     }
 }
 
+fn assert_owner_of(owner_id: &AccountId) {
+    require!(env::predecessor_account_id() == *owner_id, "owner only");
+}
+
+fn authorize_migrate(owner_id: &AccountId) {
+    let pred = env::predecessor_account_id();
+    require!(
+        pred == env::current_account_id() || pred == *owner_id,
+        "only the contract account or the owner can migrate"
+    );
+}
+
+fn contract_from_v1(old: ContractV1) -> Contract {
+    let upkeep_this_round = old.econ.upkeep;
+    let fee_bps_this_round = old.econ.winner_fee_bps;
+    let previous = old.econ.round;
+    Contract {
+        owner_id: old.owner_id,
+        agent_accounts: old.agent_accounts,
+        agent_names: old.agent_names,
+        econ: Economics {
+            agents: old.econ.agents,
+            round: LiveRound {
+                id: previous.id,
+                betting_end_ns: previous.betting_end_ns,
+                reveal_end_ns: previous.reveal_end_ns,
+                pool: previous.pool,
+                backed: previous.backed,
+                alive: previous.alive,
+                commitments: previous.commitments,
+                moves: previous.moves,
+                reasonings: previous.reasonings,
+                settle_height: previous.settle_height,
+                upkeep_this_round,
+                fee_bps_this_round,
+            },
+            protocol_treasury: old.econ.protocol_treasury,
+            upkeep: DEFAULT_UPKEEP,
+            winner_fee_bps: old.econ.winner_fee_bps,
+            min_treasury: old.econ.min_treasury,
+            betting_duration_ns: old.econ.betting_duration_ns,
+            reveal_duration_ns: old.econ.reveal_duration_ns,
+        },
+        history: old.history,
+        bets: old.bets,
+        schema_version: SCHEMA_VERSION,
+    }
+}
+
 fn liquid_balance() -> u128 {
     let balance = env::account_balance().as_yoctonear();
     let locked = u128::from(env::storage_usage()) * STORAGE_BYTE_COST;
@@ -755,7 +874,7 @@ mod contract_tests {
             U128(near_to_yocto(1)),
         );
         let arena = contract.get_arena();
-        assert_eq!(arena.version, "0.1.0");
+        assert_eq!(arena.version, "0.2.0");
         assert_eq!(arena.agents.len(), 3);
         assert_eq!(arena.agents[0].name, "Momentum");
         let deposited = near_to_yocto(6);
@@ -1041,5 +1160,183 @@ mod contract_tests {
             contract.back_agent(0);
         }));
         assert!(backed.is_err());
+    }
+
+    #[test]
+    fn owner_config_applies_from_the_next_round() {
+        testing_env!(context("owner.test.near", near_to_yocto(6), 1_000, [0u8; 32]).build());
+        let mut contract = Contract::new(
+            account("owner.test.near"),
+            agents(),
+            U64(5_000),
+            U64(5_000),
+            U128(10),
+            500,
+            U128(1),
+        );
+        let betting_end = contract.econ.round.betting_end_ns;
+        assert_eq!(contract.econ.round.upkeep_this_round, 10);
+        assert_eq!(contract.econ.round.fee_bps_this_round, 500);
+
+        testing_env!(context("alice.test.near", 0, 1_100, [0u8; 32]).build());
+        let stranger = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            contract.set_upkeep(U128(1));
+        }));
+        assert!(stranger.is_err());
+
+        testing_env!(context("owner.test.near", 0, 1_100, [0u8; 32]).build());
+        let too_high = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            contract.set_upkeep(U128(MAX_UPKEEP + 1));
+        }));
+        assert!(too_high.is_err());
+        let fee = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            contract.set_fee(MAX_FEE_BPS + 1);
+        }));
+        assert!(fee.is_err());
+        let short = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            contract.set_round_durations(U64(MIN_DURATION_NS - 1), U64(MIN_DURATION_NS));
+        }));
+        assert!(short.is_err());
+        let long = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            contract.set_round_durations(U64(MIN_DURATION_NS), U64(MAX_DURATION_NS + 1));
+        }));
+        assert!(long.is_err());
+
+        contract.set_upkeep(U128(0));
+        contract.set_upkeep(U128(77));
+        contract.set_fee(0);
+        contract.set_round_durations(U64(MIN_DURATION_NS), U64(MAX_DURATION_NS));
+        assert_eq!(contract.econ.upkeep, 77);
+        assert_eq!(contract.econ.winner_fee_bps, 0);
+        assert_eq!(contract.econ.round.upkeep_this_round, 10);
+        assert_eq!(contract.econ.round.fee_bps_this_round, 500);
+        assert_eq!(contract.econ.round.betting_end_ns, betting_end);
+
+        finish_round(&mut contract, 11_000, [0u8; 32]);
+        let settled = contract.get_settled_round(U64(0)).expect("settled");
+        assert_eq!(
+            settled
+                .upkeep_charged
+                .iter()
+                .map(|v| v.0)
+                .collect::<Vec<_>>(),
+            vec![10, 10, 10]
+        );
+        assert_eq!(settled.fee.0, 0);
+        assert_eq!(contract.econ.round.id, 1);
+        assert_eq!(contract.econ.round.upkeep_this_round, 77);
+        assert_eq!(contract.econ.round.fee_bps_this_round, 0);
+        assert_eq!(contract.econ.round.betting_end_ns - 11_000, MIN_DURATION_NS);
+        assert_eq!(
+            contract.econ.round.reveal_end_ns - contract.econ.round.betting_end_ns,
+            MAX_DURATION_NS
+        );
+    }
+
+    #[test]
+    fn migrate_from_schema_v1_keeps_bets_and_snapshots_the_open_round() {
+        use super::state_v1::{ContractV1, EconomicsV1, LiveRoundV1};
+        use near_sdk::store::{LookupMap, Vector};
+
+        testing_env!(context("arena.test.near", 0, 5_000, [0u8; 32]).build());
+        let old_upkeep = 50_000_000_000_000_000_000_000u128;
+        let mut agents = [
+            AgentState::default(),
+            AgentState::default(),
+            AgentState::default(),
+        ];
+        for agent in &mut agents {
+            agent.treasury = near_to_yocto(1);
+            agent.retired = false;
+        }
+        let mut bets: LookupMap<BetKey, UserBet> = LookupMap::new(b"b");
+        bets.insert(
+            BetKey {
+                round_id: 0,
+                account_id: account("alice.test.near"),
+            },
+            UserBet {
+                stakes: [7, 0, 0],
+                storage_paid: 3,
+                claimed: false,
+            },
+        );
+        bets.flush();
+        let v1 = ContractV1 {
+            owner_id: account("owner.test.near"),
+            agent_accounts: [
+                account("momentum.arena.test.near"),
+                account("mean.arena.test.near"),
+                account("breakout.arena.test.near"),
+            ],
+            agent_names: [
+                "Momentum".to_string(),
+                "Mean-Reversion".to_string(),
+                "Breakout".to_string(),
+            ],
+            econ: EconomicsV1 {
+                agents,
+                round: LiveRoundV1 {
+                    id: 4,
+                    betting_end_ns: 9_000,
+                    reveal_end_ns: 12_000,
+                    pool: 7,
+                    backed: [7, 0, 0],
+                    alive: [true, true, true],
+                    commitments: [None, None, None],
+                    moves: [None, None, None],
+                    reasonings: [None, None, None],
+                    settle_height: None,
+                },
+                protocol_treasury: 42,
+                upkeep: old_upkeep,
+                winner_fee_bps: 500,
+                min_treasury: near_to_yocto(1) / 5,
+                betting_duration_ns: 1_200_000_000_000,
+                reveal_duration_ns: 600_000_000_000,
+            },
+            history: Vector::new(b"h"),
+            bets,
+        };
+        let bytes = near_sdk::borsh::to_vec(&v1).expect("serialize v1");
+        assert!(
+            Contract::try_from_slice(&bytes).is_err(),
+            "schema 1 bytes must not decode as the current contract"
+        );
+        env::storage_write(b"STATE", &bytes);
+
+        testing_env!(context("stranger.test.near", 0, 5_100, [0u8; 32]).build());
+        let denied = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Contract::migrate();
+        }));
+        assert!(denied.is_err());
+
+        testing_env!(context("arena.test.near", 0, 5_100, [0u8; 32]).build());
+        let mut migrated = Contract::migrate();
+        assert_eq!(migrated.schema_version, SCHEMA_VERSION);
+        assert_eq!(migrated.econ.upkeep, DEFAULT_UPKEEP);
+        assert_eq!(migrated.econ.round.upkeep_this_round, old_upkeep);
+        assert_eq!(migrated.econ.round.fee_bps_this_round, 500);
+        assert_eq!(migrated.econ.round.id, 4);
+        assert_eq!(migrated.econ.protocol_treasury, 42);
+        assert_eq!(migrated.econ.agents[0].treasury, near_to_yocto(1));
+        let bet = migrated
+            .get_user_bet(account("alice.test.near"), U64(0))
+            .expect("bet survived");
+        assert_eq!(bet.stakes[0].0, 7);
+        assert_eq!(bet.storage_paid.0, 3);
+
+        testing_env!(context("owner.test.near", 0, 5_150, [0u8; 32]).build());
+        migrated.set_upkeep(U128(123));
+        env::state_write(&migrated);
+        testing_env!(context("owner.test.near", 0, 5_200, [0u8; 32]).build());
+        let again = Contract::migrate();
+        assert_eq!(again.econ.upkeep, 123);
+        assert_eq!(again.econ.round.upkeep_this_round, old_upkeep);
+        assert_eq!(again.schema_version, SCHEMA_VERSION);
+        let bet = again
+            .get_user_bet(account("alice.test.near"), U64(0))
+            .expect("bet still there");
+        assert_eq!(bet.stakes[0].0, 7);
     }
 }

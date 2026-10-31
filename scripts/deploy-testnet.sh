@@ -11,6 +11,9 @@
 #
 # Optional env:
 #   NETWORK         default testnet
+#   KEYCHAIN_MODE   legacy (default) or os. Linux boxes without a Secret Service
+#                   keyring fail on sign-with-keychain; legacy writes JSON files
+#                   under ~/.near-credentials instead.
 #   WASM_PATH       default: contract/res/near_agent_arena.wasm next to the repo root
 #                   or beside this script's parent
 #
@@ -30,6 +33,21 @@ fi
 : "${ARENA_ACCOUNT:?Set ARENA_ACCOUNT to the existing testnet contract account}"
 : "${OWNER_ACCOUNT:?Set OWNER_ACCOUNT to the owner account id}"
 NETWORK="${NETWORK:-testnet}"
+KEYCHAIN_MODE="${KEYCHAIN_MODE:-legacy}"
+case "$KEYCHAIN_MODE" in
+  legacy)
+    SAVE_KEYCHAIN="save-to-legacy-keychain"
+    SIGN_KEYCHAIN="sign-with-legacy-keychain"
+    ;;
+  os)
+    SAVE_KEYCHAIN="save-to-keychain"
+    SIGN_KEYCHAIN="sign-with-keychain"
+    ;;
+  *)
+    echo "KEYCHAIN_MODE must be legacy or os (got ${KEYCHAIN_MODE})." >&2
+    exit 1
+    ;;
+esac
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DEFAULT_WASM="$SCRIPT_DIR/../contract/res/near_agent_arena.wasm"
@@ -59,9 +77,10 @@ fi
 # commit, reveal, begin_settle, and a later finalize_settle.
 BETTING_NS="1200000000000"
 REVEAL_NS="600000000000"
-# 0.05 NEAR upkeep, 0.2 NEAR minimum to be alive. Init attaches 4 NEAR:
+# 0.0005 NEAR upkeep keeps a 1 NEAR treasury alive for about 41 days of
+# 30-minute rounds. 0.2 NEAR minimum to be alive. Init attaches 4 NEAR:
 # 1 NEAR stays as the contract state buffer and the other 3 are split across agents.
-UPKEEP="50000000000000000000000"
+UPKEEP="500000000000000000000"
 MIN_TREASURY="200000000000000000000000"
 
 AGENTS=(
@@ -82,10 +101,10 @@ for agent in "${AGENTS[@]}"; do
   near account \
     create-account fund-myself "$agent" '3 NEAR' \
     autogenerate-new-keypair \
-    save-to-keychain \
+    "$SAVE_KEYCHAIN" \
     sign-as "$ARENA_ACCOUNT" \
     network-config "$NETWORK" \
-    sign-with-keychain \
+    "$SIGN_KEYCHAIN" \
     send
   cred="${CREDS}/${agent}.json"
   if [[ -f "$cred" ]]; then
@@ -100,7 +119,7 @@ near contract \
   use-file "$WASM_PATH" \
   without-init-call \
   network-config "$NETWORK" \
-  sign-with-keychain \
+  "$SIGN_KEYCHAIN" \
   send
 
 INIT_JSON="$(cat <<JSON
@@ -117,7 +136,7 @@ near contract \
   attached-deposit '4 NEAR' \
   sign-as "$ARENA_ACCOUNT" \
   network-config "$NETWORK" \
-  sign-with-keychain \
+  "$SIGN_KEYCHAIN" \
   send
 
 echo "Adding commit/reveal function-call keys"
@@ -129,54 +148,17 @@ for agent in "${AGENTS[@]}"; do
       --contract-account-id "$ARENA_ACCOUNT" \
       --function-names 'commit,reveal' \
     autogenerate-new-keypair \
-    save-to-keychain \
+    "$SAVE_KEYCHAIN" \
     network-config "$NETWORK" \
-    sign-with-keychain \
+    "$SIGN_KEYCHAIN" \
     send
 done
 
-python3 - "$NETWORK" "$ARENA_ACCOUNT" "${AGENTS[0]}" "${AGENTS[1]}" "${AGENTS[2]}" <<'PY'
-import json, os, stat, sys
-network, arena, a0, a1, a2 = sys.argv[1:]
-home = os.path.expanduser(f"~/.near-credentials/{network}")
-
-def load(account):
-    path = os.path.join(home, f"{account}.json")
-    with open(path, encoding="utf-8") as handle:
-        data = json.load(handle)
-    private = data.get("private_key") or data.get("secret_key")
-    public = data.get("public_key")
-    account_id = data.get("account_id", account)
-    if not private or not public:
-        raise SystemExit(f"{path} is missing public_key/private_key")
-    return account_id, public, private
-
-settler_id, settler_pub, settler_priv = load(arena)
-agents = []
-publics = []
-for account in (a0, a1, a2):
-    account_id, public, private = load(account)
-    agents.append({"accountId": account_id, "privateKey": private})
-    publics.append((account_id, public))
-
-out = {
-    "contractId": arena,
-    "rpcUrl": "https://rpc.testnet.near.org",
-    "networkId": network,
-    "settler": {"accountId": settler_id, "privateKey": settler_priv},
-    "agents": agents,
-}
-dest = os.path.expanduser("~/.near-credentials/near-agent-arena-keys.json")
-with open(dest, "w", encoding="utf-8") as handle:
-    json.dump(out, handle, indent=2)
-    handle.write("\n")
-os.chmod(dest, stat.S_IRUSR | stat.S_IWUSR)
-
-print("Function-call public keys (secrets were not printed):")
-print(f"  settler {settler_id} {settler_pub}")
-for account_id, public in publics:
-    print(f"  agent   {account_id} {public}")
-print(f"Worker secret file, mode 600: {dest}")
-print("Copy that file into the GitHub secret NEAR_AGENT_KEYS_JSON. Do not commit it.")
-print("Full-access backups, if create-account saved one: ~/.near-credentials/" + network + "/<agent>.json.full-access")
-PY
+python3 "$SCRIPT_DIR/agent_keys.py" \
+  --network "$NETWORK" \
+  --arena "$ARENA_ACCOUNT" \
+  --agent "${AGENTS[0]}" \
+  --agent "${AGENTS[1]}" \
+  --agent "${AGENTS[2]}"
+echo "Full-access copies, if create-account saved one: ${CREDS}/<agent>.json.full-access"
+echo "The worker JSON uses each agent's function-call key, not <agent>.json."
