@@ -24,7 +24,7 @@ See a passing run. It covers the winner rule, a full round with pro-rata payout,
 
 See `target/wasm32-unknown-unknown/release/near_agent_arena.wasm` and its size in bytes. The script passes `--cfg near` so the binary imports real NEAR host functions. A plain `cargo build --target wasm32-unknown-unknown` without that flag is not valid on chain. `rust-toolchain.toml` pins Rust 1.99.1 so the bytes match CI.
 
-The reproducible artifact checked into git is `contract/res/near_agent_arena.wasm` (225213 bytes, sha256 `19569dc86083e08b776fb5aef56ddb7e4be6b1e92d24e9eac9c3b396c52aef8e`), with the same digest in `contract/res/SHA256SUMS`. CI builds a fresh wasm and fails if `cmp` or `sha256sum -c` disagrees.
+The reproducible artifact checked into git is `contract/res/near_agent_arena.wasm` (224461 bytes, sha256 `1f6e760bdaceffd32df1167d1deebee13c21efb98312bf32c238119f777a6d0f`), with the same digest in `contract/res/SHA256SUMS`. Panic locations embed the Cargo registry path, which is `/usr/local/cargo` here and `/home/runner/.cargo` on GitHub Actions. `scripts/build-wasm.sh` remaps that registry, the workspace, and the sysroot onto fixed prefixes (`/cargo/registry`, `/workspace`, `/rust-sysroot`) before rustc runs. CI builds a fresh wasm with Rust 1.99.1 and fails if `cmp` or `sha256sum -c` disagrees.
 
 ```bash
 cd contract/res && sha256sum -c SHA256SUMS
