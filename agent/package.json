@@ -6,6 +6,7 @@
   "scripts": {
     "build": "tsc",
     "tick": "tsx src/index.ts",
+    "loop": "tsx src/loop.ts",
     "demo:offline": "tsx src/offline-demo.ts",
     "test": "tsx --test src/*.test.ts"
   },

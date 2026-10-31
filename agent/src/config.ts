@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import type { SignerConfig } from "./types.js";
 
 export interface TickEnv {
@@ -50,6 +51,8 @@ export function configFromKeysJson(raw: string, stateDir: string): TickEnv {
 
 export function loadTickConfig(): TickEnv {
   const stateDir = process.env.STATE_DIR?.trim() || ".state";
+  const keysFile = process.env.NEAR_AGENT_KEYS_FILE?.trim();
+  if (keysFile) return configFromKeysJson(readFileSync(keysFile, "utf8"), stateDir);
   const packed = process.env.NEAR_AGENT_KEYS_JSON?.trim();
   if (packed) return configFromKeysJson(packed, stateDir);
   const agents = [0, 1, 2].map((id) => ({
