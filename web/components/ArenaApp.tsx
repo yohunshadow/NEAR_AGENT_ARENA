@@ -27,6 +27,15 @@ import { ArenaFrame, type FighterView, type HistoryView } from "./ArenaFrame";
 
 const NAMES = ["Momentum", "Mean-Reversion", "Breakout"] as const;
 
+function telemetry(mode: "demo" | "live" | "setup", round: string) {
+  return {
+    network: nearNetwork(),
+    contract: contractId() || "unset",
+    round,
+    mode,
+  };
+}
+
 function formatMs(ms: number): string {
   const total = Math.max(0, Math.ceil(ms / 1000));
   const minutes = Math.floor(total / 60);
@@ -54,6 +63,7 @@ function idleFighters(): FighterView[] {
     move: null,
     reasoning: null,
     highlight: false,
+    backed: false,
     backLabel: `Back ${name}`,
     backDisabled: true,
     onBack: () => undefined,
@@ -92,6 +102,7 @@ function DemoView() {
       move: choice ? MOVE_NAMES[choice.move] : null,
       reasoning: choice?.reasoning ?? null,
       highlight: last?.winner === agent.id,
+      backed: state.userStakes[agent.id] > 0n,
       backLabel: `Back ${agent.name}`,
       backDisabled: state.phase !== "betting" || !state.alive[agent.id],
       onBack: () => setState((current) => backAgent(current, agent.id, amount)),
@@ -115,7 +126,7 @@ function DemoView() {
       countdown={formatMs(state.msLeft)}
       urgent={state.msLeft < 3000}
       poolLabel={`${formatMicro(state.pool)} NEAR`}
-      roundNote={`your balance ${formatMicro(state.userBalance)} NEAR`}
+      roundNote={`Your balance ${formatMicro(state.userBalance)} NEAR`}
       onAdvance={() => setState((current) => advance(current))}
       fighters={fighters}
       amount={amount}
@@ -125,6 +136,7 @@ function DemoView() {
       history={state.history.map((row) => historyFromDemo(row, state))}
       log={state.log}
       footnote={`Each betting window lasts ${BETTING_MS / 1000} seconds unless you advance it.`}
+      telemetry={telemetry("demo", String(state.roundId))}
     />
   );
 }
@@ -297,6 +309,7 @@ function LiveView() {
         phase="idle"
         fighters={idleFighters()}
         history={[]}
+        telemetry={telemetry("setup", "—")}
       />
     );
   }
@@ -325,6 +338,7 @@ function LiveView() {
           move: move !== null && move !== undefined ? MOVE_NAMES[move] : null,
           reasoning: reasoning || null,
           highlight: last?.winner === agent.id,
+          backed: userStake ? BigInt(userStake) > 0n : false,
           backLabel: `Back ${agent.name}`,
           backDisabled: busy || arena.current.phase !== "betting" || !arena.current.alive[agent.id],
           onBack: () => {
@@ -412,6 +426,7 @@ function LiveView() {
             : undefined
       }
       history={history}
+      telemetry={telemetry("live", arena ? String(arena.current.id) : "—")}
     />
   );
 }

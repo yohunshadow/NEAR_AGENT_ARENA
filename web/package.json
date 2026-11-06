@@ -11,6 +11,7 @@
     "@near-wallet-selector/core": "^8.10.1",
     "@near-wallet-selector/modal-ui": "^8.10.1",
     "@near-wallet-selector/my-near-wallet": "^8.10.1",
+    "motion": "^14.10.1",
     "next": "^15.5.4",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"
