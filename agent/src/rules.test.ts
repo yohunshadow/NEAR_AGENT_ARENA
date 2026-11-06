@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { commitmentHex } from "./hash.js";
-import { parseModelChoice } from "./llm.js";
+import { choiceFromMessage, parseModelChoice } from "./llm.js";
 import { decide, offlineChoice } from "./rules.js";
 
 test("commitment preimage matches the contract vector", () => {
@@ -70,4 +70,26 @@ test("model JSON is parsed and junk falls through", () => {
   });
   assert.equal(parseModelChoice("I like paper"), null);
   assert.equal(parseModelChoice('{"move":7,"reasoning":"no"}'), null);
+});
+
+test("reasoning models can put the move beside an empty content field", () => {
+  assert.deepEqual(
+    choiceFromMessage({
+      content: "",
+      reasoning: 'thinking\n{"move":1,"reasoning":"fade the last line"}',
+    }),
+    { move: 1, reasoning: "fade the last line" },
+  );
+  assert.deepEqual(
+    choiceFromMessage({
+      content: null,
+      reasoning_content: '{"move":0,"reasoning":"press"}',
+    }),
+    { move: 0, reasoning: "press" },
+  );
+  assert.equal(choiceFromMessage({ content: "", reasoning: "no json here" }), null);
+  assert.deepEqual(choiceFromMessage({ content: '{"move":2,"reasoning":"shell"}', reasoning: "ignore" }), {
+    move: 2,
+    reasoning: "shell",
+  });
 });

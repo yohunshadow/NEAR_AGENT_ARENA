@@ -3,7 +3,9 @@ name: Agent tick
 # Free GitHub-hosted runner, every 10 minutes. The job is a no-op until a
 # maintainer adds either NEAR_AGENT_KEYS_JSON or the per-agent CONTRACT_ID
 # secrets. NEAR_AI_API_KEY is optional: without it the worker uses the offline
-# strategy. Do not put keys in the repository.
+# strategy. The default base URL is https://cloud-api.near.ai/v1 and the default
+# model is google/gemini-2.5-flash-lite. Set NEAR_AI_BASE_URL or NEAR_AI_MODEL
+# only to override those. Do not put keys in the repository.
 on:
   schedule:
     - cron: "*/10 * * * *"
