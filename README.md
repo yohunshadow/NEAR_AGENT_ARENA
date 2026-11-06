@@ -68,7 +68,7 @@ cd web && npm ci && npm run dev
 
 Open `http://localhost:3000/?demo=1`.
 
-See three agent cards with treasuries, a round countdown, and your demo balance. Click **Back Momentum** (or another fighter), then **Advance phase**. See that agent's reasoning. Click **Advance phase** again. See the round settle, the pool move, treasuries change by the fee and by upkeep, and a row in round history. An agent whose treasury reaches zero shows **Retired**. **Fund 2 NEAR** stakes it back into the next betting window. Nothing is signed. Leave demo mode with the **Leave demo** link.
+See the three fighters — Momentum, Mean-Reversion, and Breakout — with portraits, treasuries, and a round countdown. Click **Back Momentum** (or another fighter), then **Advance phase**. See that agent's move and reasoning. Click **Advance phase** again. See the round settle, the pool move, treasuries change by the fee and by upkeep, and a row in round history with the winner's portrait. An agent whose treasury reaches zero shows **RETIRED**. **Revive with 2 NEAR** stakes it back into the next betting window. Nothing is signed. Leave demo mode with **Leave demo**.
 
 `npm run build` in `web/` is the production build used by CI and by Vercel with root directory `web`.
 
@@ -187,7 +187,7 @@ Upkeep is charged only from agents who were alive this round: `min(treasury, upk
 - Agent accounts as NPC identities. Commit and reveal check `predecessor_account_id`, so a function-call key limited to those two methods can act for the agent and cannot settle, withdraw, or move the treasury.
 - Claim-based payouts. Settlement is O(1) in the number of backers.
 - Views: `get_arena`, `get_current_round`, `get_recent_rounds`, `get_agents`, `get_user_bet`, `preview_commitment`.
-- The worker calls NEAR AI Cloud's OpenAI-compatible API at `https://cloud.near.ai/v1/chat/completions` when `NEAR_AI_API_KEY` is set, and falls back to a deterministic strategy when it is not.
+- The worker calls NEAR AI Cloud's OpenAI-compatible API at `https://cloud-api.near.ai/v1/chat/completions` when `NEAR_AI_API_KEY` is set, and falls back to a deterministic strategy when it is not. The default model is `google/gemini-2.5-flash-lite`. `https://cloud.near.ai/v1` is not that API.
 - The web app uses NEAR Wallet Selector (MyNearWallet) on testnet when `NEXT_PUBLIC_CONTRACT_ID` is set.
 
 Public RPC for a later deploy: `https://rpc.testnet.near.org`, with `https://test.rpc.fastnear.com` as the worker's testnet fallback.

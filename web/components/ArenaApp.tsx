@@ -2,13 +2,13 @@
 
 import { useEffect, useMemo, useState } from "react";
 import "@near-wallet-selector/modal-ui/styles.css";
+import { useSearchParams } from "next/navigation";
 import {
   advance,
   backAgent,
   BETTING_MS,
   fundAgent,
   initialDemo,
-  MOVE_NAMES,
   tickDemo,
   type DemoState,
 } from "../lib/demo";
@@ -22,15 +22,46 @@ import {
   type Arena,
   type UserBet,
 } from "../lib/near";
-import { useSearchParams } from "next/navigation";
+import { AGENT_BLURBS, MOVE_NAMES } from "../lib/rules";
+import { ArenaFrame, type FighterView, type HistoryView } from "./ArenaFrame";
 
-const COLORS = ["momentum", "reversion", "breakout"] as const;
+const NAMES = ["Momentum", "Mean-Reversion", "Breakout"] as const;
 
 function formatMs(ms: number): string {
   const total = Math.max(0, Math.ceil(ms / 1000));
   const minutes = Math.floor(total / 60);
   const seconds = total % 60;
   return `${minutes}:${seconds.toString().padStart(2, "0")}`;
+}
+
+function ratios(values: bigint[]): number[] {
+  const max = values.reduce((best, value) => (value > best ? value : best), 0n);
+  if (max === 0n) return values.map(() => 0);
+  return values.map((value) => Number((value * 1000n) / max) / 1000);
+}
+
+function idleFighters(): FighterView[] {
+  return NAMES.map((name, id) => ({
+    id,
+    name,
+    tagline: AGENT_BLURBS[id],
+    treasury: "—",
+    ratio: 0.35,
+    wins: 0,
+    fought: 0,
+    status: "waiting",
+    stake: "—",
+    move: null,
+    reasoning: null,
+    highlight: false,
+    backLabel: `Back ${name}`,
+    backDisabled: true,
+    onBack: () => undefined,
+    fundLabel: "Fund",
+    fundDisabled: true,
+    onFund: () => undefined,
+    showActions: false,
+  }));
 }
 
 function DemoView() {
@@ -44,182 +75,79 @@ function DemoView() {
     return () => clearInterval(timer);
   }, [state.roundId, state.phase]);
 
-  const phaseLabel = state.phase === "betting" ? "Betting" : "Reveal";
+  const bars = ratios(state.agents.map((agent) => agent.treasury));
+  const last = state.history[0];
+  const fighters: FighterView[] = state.agents.map((agent) => {
+    const choice = state.choices[agent.id];
+    return {
+      id: agent.id,
+      name: agent.name,
+      tagline: agent.blurb,
+      treasury: `${formatMicro(agent.treasury)} NEAR`,
+      ratio: bars[agent.id],
+      wins: agent.wins,
+      fought: agent.roundsFought,
+      status: agent.retired ? "retired" : state.alive[agent.id] ? "in" : "waiting",
+      stake: `${formatMicro(state.userStakes[agent.id])} NEAR`,
+      move: choice ? MOVE_NAMES[choice.move] : null,
+      reasoning: choice?.reasoning ?? null,
+      highlight: last?.winner === agent.id,
+      backLabel: `Back ${agent.name}`,
+      backDisabled: state.phase !== "betting" || !state.alive[agent.id],
+      onBack: () => setState((current) => backAgent(current, agent.id, amount)),
+      fundLabel: agent.retired ? "Revive with 2 NEAR" : "Fund 2 NEAR",
+      fundDisabled: false,
+      onFund: () => setState((current) => fundAgent(current, agent.id)),
+      showActions: true,
+    };
+  });
+
   return (
-    <main className="shell">
-      <header className="top">
-        <div>
-          <h1>NEAR Agent Arena</h1>
-          <p>Three fighter agents. One pool. Treasuries that grow, shrink, and can die.</p>
-        </div>
-        <div className="row">
-          <span className="badge demo">Demo mode</span>
-          <a href="/">Leave demo</a>
-        </div>
-      </header>
-      <p className="banner">
-        Nothing is signed. This browser is running the same winner rule as the contract, on a fast clock.
-        Remove <code>?demo=1</code> to use a testnet wallet.
-      </p>
-      {state.banner ? <p className="banner">{state.banner}</p> : null}
-      <section className="panel">
-        <div className="row" style={{ justifyContent: "space-between" }}>
-          <div>
-            <h3>Round {state.roundId}</h3>
-            <p className="muted">
-              {phaseLabel} · {formatMs(state.msLeft)} left · pool {formatMicro(state.pool)} NEAR · your balance{" "}
-              {formatMicro(state.userBalance)} NEAR
-            </p>
-          </div>
-          <button className="primary" type="button" onClick={() => setState((current) => advance(current))}>
-            Advance phase
-          </button>
-        </div>
-      </section>
-      <section className="grid">
-        {state.agents.map((agent) => {
-          const choice = state.choices[agent.id];
-          const last = state.history[0];
-          const won = last?.winner === agent.id;
-          return (
-            <article
-              key={agent.id}
-              className={`card ${COLORS[agent.id]} ${agent.retired ? "retired" : ""} ${won ? "winner" : ""}`}
-            >
-              <h2>{agent.name}</h2>
-              <p className="blurb">{agent.blurb}</p>
-              <p className="stat">{formatMicro(agent.treasury)} NEAR</p>
-              <p className="meta">
-                {agent.retired ? "Retired" : state.alive[agent.id] ? "In this round" : "Waiting"} · {agent.wins} wins ·{" "}
-                {agent.roundsFought} fought
-              </p>
-              <p className="meta">Your stake {formatMicro(state.userStakes[agent.id])} NEAR</p>
-              {choice ? (
-                <p className="reason">
-                  <strong>{MOVE_NAMES[choice.move]}.</strong> {choice.reasoning}
-                </p>
-              ) : null}
-              <div className="row" style={{ marginTop: 12 }}>
-                <button
-                  className="primary"
-                  type="button"
-                  disabled={state.phase !== "betting" || !state.alive[agent.id]}
-                  onClick={() => setState((current) => backAgent(current, agent.id, amount))}
-                >
-                  Back {agent.name}
-                </button>
-                <button className="ghost" type="button" onClick={() => setState((current) => fundAgent(current, agent.id))}>
-                  Fund 2 NEAR
-                </button>
-              </div>
-            </article>
-          );
-        })}
-      </section>
-      <section className="panel">
-        <div className="row">
-          <label htmlFor="amount">Bet amount (NEAR)</label>
-          <input id="amount" value={amount} onChange={(event) => setAmount(event.target.value)} />
-          <span className="muted">Demo upkeep is 0.50 NEAR each round. A treasury at zero is retired.</span>
-        </div>
-      </section>
-      <HistoryTable
-        rows={state.history.map((row) => {
-          const described = describeSettledRound({
-            winner: row.winner,
-            refund: row.winner === null && row.pool > 0n,
-            pool: row.pool,
-            moves: row.moves,
-            scores: row.scores,
-            agentName: (id) => state.agents[id]?.name ?? String(id),
-          });
-          return {
-            id: row.id,
-            winner: described.winner,
-            pool: `${formatMicro(row.pool)} NEAR`,
-            detail: row.note,
-            reasons: row.reasonings,
-          };
-        })}
-      />
-      <LogList lines={state.log} />
-      <Fairness />
-      <p className="muted">Each betting window lasts {BETTING_MS / 1000} seconds unless you advance it.</p>
-    </main>
+    <ArenaFrame
+      mode="demo"
+      notice={
+        state.banner
+          ? `${state.banner} Nothing on this page is signed.`
+          : "Nothing is signed. This browser runs the same winner rule as the contract, on a fast clock."
+      }
+      roundLabel={`Round ${state.roundId}`}
+      phase={state.phase}
+      countdown={formatMs(state.msLeft)}
+      urgent={state.msLeft < 3000}
+      poolLabel={`${formatMicro(state.pool)} NEAR`}
+      roundNote={`your balance ${formatMicro(state.userBalance)} NEAR`}
+      onAdvance={() => setState((current) => advance(current))}
+      fighters={fighters}
+      amount={amount}
+      onAmount={setAmount}
+      amountId="demo-stake"
+      amountHint="Demo upkeep is 0.50 NEAR each round. A treasury at zero is retired."
+      history={state.history.map((row) => historyFromDemo(row, state))}
+      log={state.log}
+      footnote={`Each betting window lasts ${BETTING_MS / 1000} seconds unless you advance it.`}
+    />
   );
 }
 
-function HistoryTable({
-  rows,
-}: {
-  rows: { id: number; winner: string; pool: string; detail: string; reasons: (string | null)[] }[];
-}) {
-  return (
-    <section className="panel">
-      <h3>Round history</h3>
-      {rows.length === 0 ? (
-        <p className="muted">No settled rounds yet.</p>
-      ) : (
-        <table>
-          <thead>
-            <tr>
-              <th>Round</th>
-              <th>Winner</th>
-              <th>Pool</th>
-              <th>What the agents said</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((row) => (
-              <tr key={row.id}>
-                <td>{row.id}</td>
-                <td>{row.winner}</td>
-                <td>{row.pool}</td>
-                <td>
-                  {row.detail}
-                  {row.reasons.some(Boolean) ? (
-                    <div className="muted">
-                      {row.reasons.map((reason, index) => (reason ? <div key={index}>{reason}</div> : null))}
-                    </div>
-                  ) : null}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
-    </section>
-  );
-}
-
-function LogList({ lines }: { lines: string[] }) {
-  if (lines.length === 0) return null;
-  return (
-    <section className="panel">
-      <h3>Latest</h3>
-      <ul className="log">
-        {lines.map((line, index) => (
-          <li key={`${index}-${line}`}>{line}</li>
-        ))}
-      </ul>
-    </section>
-  );
-}
-
-function Fairness() {
-  return (
-    <details>
-      <summary>How a winner is chosen</summary>
-      <p>
-        Aggressive beats Defensive, Defensive beats Balanced, and Balanced beats Aggressive. Each fighter scores 2
-        points for a win and 1 for a tie against the other fighters who revealed. The settle block&apos;s random seed
-        adds a tie-break smaller than one matchup point. If the full scores are still equal, the lowest agent id wins.
-        In this demo the seed is a local stand-in. On chain it is <code>env::random_seed()</code>. An empty pool does
-        not cancel that result: if anyone revealed, the highest score still wins. Nobody revealed means there is no
-        winner.
-      </p>
-    </details>
-  );
+function historyFromDemo(row: DemoState["history"][number], state: DemoState): HistoryView {
+  const described = describeSettledRound({
+    winner: row.winner,
+    refund: row.winner === null && row.pool > 0n,
+    pool: row.pool,
+    moves: row.moves,
+    scores: row.scores,
+    agentName: (id) => state.agents[id]?.name ?? String(id),
+  });
+  return {
+    id: row.id,
+    winnerId: row.winner,
+    winnerName: described.winner,
+    pool: `${formatMicro(row.pool)} NEAR`,
+    detail: row.note,
+    moves: row.moves,
+    scores: row.scores,
+    reasons: row.reasonings,
+  };
 }
 
 function chainCountdown(arena: Arena, fetchedAt: number): number {
@@ -230,12 +158,10 @@ function chainCountdown(arena: Arena, fetchedAt: number): number {
   return Number(left / 1_000_000n);
 }
 
-function phaseLine(arena: Arena, countdown: number): string {
-  const pool = `pool ${formatYocto(arena.current.pool)} NEAR`;
-  if (arena.current.phase === "finalize") return `Finalizing on the next block · ${pool}`;
-  if (arena.current.phase === "settle") return `Reveal window closed · settling · ${pool}`;
-  const label = arena.current.phase === "betting" ? "Betting" : arena.current.phase === "reveal" ? "Reveal" : arena.current.phase;
-  return `${label} · ${formatMs(countdown)} left · ${pool}`;
+function livePhase(phase: string): "betting" | "reveal" | "settling" {
+  if (phase === "betting") return "betting";
+  if (phase === "reveal") return "reveal";
+  return "settling";
 }
 
 function LiveView() {
@@ -317,7 +243,7 @@ function LiveView() {
         network: nearNetwork() as "testnet",
         modules: [setupMyNearWallet()],
       });
-      const nextModal = setupModal(nextSelector, { contractId: id });
+      const nextModal = setupModal(nextSelector, { contractId: id, theme: "dark" });
       const state = nextSelector.store.getState();
       if (!cancelled) {
         setSelector(nextSelector);
@@ -366,169 +292,132 @@ function LiveView() {
 
   if (!id) {
     return (
-      <main className="shell">
-        <header className="top">
-          <div>
-            <h1>NEAR Agent Arena</h1>
-            <p>Three fighter agents. One pool. Treasuries that grow, shrink, and can die.</p>
-          </div>
-        </header>
-        <p className="banner">
-          No contract is configured. Set <code>NEXT_PUBLIC_CONTRACT_ID</code> for testnet, or open the simulated arena.
-        </p>
-        <p>
-          <a href="/?demo=1">Open demo mode</a>
-        </p>
-        <Fairness />
-      </main>
+      <ArenaFrame
+        mode="setup"
+        phase="idle"
+        fighters={idleFighters()}
+        history={[]}
+      />
     );
   }
 
   const last = arena?.recent_rounds[0];
+  const phase = arena ? livePhase(arena.current.phase) : "idle";
+  const treasuries = arena ? arena.agents.map((agent) => BigInt(agent.treasury || "0")) : [];
+  const bars = ratios(treasuries);
+  const fighters: FighterView[] = arena
+    ? arena.agents.map((agent) => {
+        const reasoning = last?.reasonings?.[agent.id] || arena.current.reasonings[agent.id];
+        const move = last?.moves?.[agent.id] ?? arena.current.moves[agent.id];
+        const userStake = bet?.stakes?.[agent.id];
+        return {
+          id: agent.id,
+          name: agent.name,
+          tagline: AGENT_BLURBS[agent.id] || "",
+          subline: agent.account_id,
+          treasury: `${formatYocto(agent.treasury)} NEAR`,
+          ratio: bars[agent.id] ?? 0,
+          wins: agent.wins,
+          fought: agent.rounds_fought,
+          status: agent.retired ? "retired" : agent.alive_this_round ? "in" : "waiting",
+          stake: userStake ? `${formatYocto(userStake)} NEAR` : "0 NEAR",
+          poolOnAgent: `${formatYocto(arena.current.backed[agent.id] || "0")} NEAR`,
+          move: move !== null && move !== undefined ? MOVE_NAMES[move] : null,
+          reasoning: reasoning || null,
+          highlight: last?.winner === agent.id,
+          backLabel: `Back ${agent.name}`,
+          backDisabled: busy || arena.current.phase !== "betting" || !arena.current.alive[agent.id],
+          onBack: () => {
+            const deposit = parseNearToYocto(amount);
+            if (deposit === null) {
+              setError("Enter a NEAR amount like 1 or 0.5.");
+              return;
+            }
+            void send("back_agent", { agent_id: agent.id }, deposit.toString());
+          },
+          fundLabel: agent.retired ? "Revive with 1 NEAR" : "Fund 1 NEAR",
+          fundDisabled: busy,
+          onFund: () => {
+            const deposit = parseNearToYocto("1");
+            void send("fund_agent", { agent_id: agent.id }, (deposit ?? 0n).toString());
+          },
+          showActions: true,
+        };
+      })
+    : idleFighters();
+
+  const history: HistoryView[] = arena
+    ? arena.recent_rounds.map((row) => {
+        const described = describeSettledRound({
+          winner: row.winner,
+          refund: row.refund,
+          pool: BigInt(row.pool || "0"),
+          fee: BigInt(row.fee || "0"),
+          moves: row.moves,
+          scores: row.scores,
+          agentName: (agentId) => arena.agents[agentId]?.name || String(agentId),
+        });
+        return {
+          id: row.id,
+          winnerId: row.winner,
+          winnerName: described.winner,
+          pool: `${formatYocto(row.pool)} NEAR`,
+          detail: described.detail,
+          moves: row.moves,
+          scores: row.scores,
+          reasons: row.reasonings,
+        };
+      })
+    : [];
+
+  const roundNote = arena
+    ? [
+        arena.current.ready_to_settle ? "ready to settle" : "",
+        last && last.winner === null
+          ? `round ${last.id} had no winner${(last.moves ?? []).every((move) => move === null) ? " because no agent revealed" : ""}`
+          : "",
+      ]
+        .filter(Boolean)
+        .join(". ")
+    : "reading testnet";
+
   return (
-    <main className="shell">
-      <header className="top">
-        <div>
-          <h1>NEAR Agent Arena</h1>
-          <p>Back a fighter with testnet NEAR. The contract settles the round. Agents pay their own upkeep.</p>
-        </div>
-        <div className="row">
-          <span className="badge">{nearNetwork()}</span>
-          <button className="ghost" type="button" onClick={() => modal?.show()}>
-            {accountId ? accountId : "Connect wallet"}
-          </button>
-          <a href="/?demo=1">Demo</a>
-        </div>
-      </header>
-      {error ? <p className="error">{error}</p> : null}
-      {!arena ? (
-        <p>Reading the arena from testnet…</p>
-      ) : (
-        <>
-          <section className="panel">
-            <h3>Round {arena.current.id}</h3>
-            <p className="muted">
-              {phaseLine(arena, countdown)}
-              {arena.current.ready_to_settle ? " · ready to settle" : ""}
-            </p>
-          </section>
-          <section className="grid">
-            {arena.agents.map((agent) => {
-              const won = last?.winner === agent.id;
-              const reasoning = last?.reasonings?.[agent.id] || arena.current.reasonings[agent.id];
-              const move = last?.moves?.[agent.id] ?? arena.current.moves[agent.id];
-              return (
-                <article
-                  key={agent.id}
-                  className={`card ${COLORS[agent.id]} ${agent.retired ? "retired" : ""} ${won ? "winner" : ""}`}
-                >
-                  <h2>{agent.name}</h2>
-                  <p className="blurb">{agent.account_id}</p>
-                  <p className="stat">{formatYocto(agent.treasury)} NEAR</p>
-                  <p className="meta">
-                    {agent.retired ? "Retired" : agent.alive_this_round ? "In this round" : "Waiting"} · {agent.wins}{" "}
-                    wins · {agent.rounds_fought} fought
-                  </p>
-                  <p className="meta">Backed this round {formatYocto(arena.current.backed[agent.id] || "0")} NEAR</p>
-                  {reasoning ? (
-                    <p className="reason">
-                      {move !== null && move !== undefined ? <strong>{MOVE_NAMES[move]}. </strong> : null}
-                      {reasoning}
-                    </p>
-                  ) : null}
-                  <div className="row" style={{ marginTop: 12 }}>
-                    <button
-                      className="primary"
-                      type="button"
-                      disabled={busy || arena.current.phase !== "betting" || !arena.current.alive[agent.id]}
-                      onClick={() => {
-                        const deposit = parseNearToYocto(amount);
-                        if (deposit === null) {
-                          setError("Enter a NEAR amount like 1 or 0.5.");
-                          return;
-                        }
-                        void send("back_agent", { agent_id: agent.id }, deposit.toString());
-                      }}
-                    >
-                      Back {agent.name}
-                    </button>
-                    <button
-                      className="ghost"
-                      type="button"
-                      disabled={busy}
-                      onClick={() => {
-                        const deposit = parseNearToYocto("1");
-                        void send("fund_agent", { agent_id: agent.id }, (deposit ?? 0n).toString());
-                      }}
-                    >
-                      Fund 1 NEAR
-                    </button>
-                  </div>
-                </article>
-              );
-            })}
-          </section>
-          <section className="panel">
-            <div className="row">
-              <label htmlFor="live-amount">Attach (NEAR)</label>
-              <input id="live-amount" value={amount} onChange={(event) => setAmount(event.target.value)} />
-              <button
-                className="ghost"
-                type="button"
-                disabled={busy || !accountId}
-                onClick={() => void send("claim", { round_id: String(Math.max(0, arena.current.id - 1)) }, "0")}
-              >
-                Claim last round
-              </button>
-              {last && last.winner === null && !last.refund ? (
-                <span className="muted">The last round has nothing to claim.</span>
-              ) : null}
-              {bet ? (
-                <span className="muted">
-                  This round stake {bet.stakes.map((stake) => formatYocto(stake)).join(" / ")}
-                  {bet.settled ? ` · payout ${formatYocto(bet.payout)}` : ""}
-                  {bet.claimed ? " · claimed" : ""}
-                </span>
-              ) : null}
-            </div>
-          </section>
-          {last && last.winner === null ? (
-            <p className="banner">
-              Round {last.id} has no winner
-              {(last.moves ?? []).every((move) => move === null) ? " because no agent revealed" : ""}. A round where
-              fighters reveal still picks a winner by score, even when nobody bet.
-            </p>
-          ) : null}
-          <HistoryTable
-            rows={arena.recent_rounds.map((row) => {
-              const described = describeSettledRound({
-                winner: row.winner,
-                refund: row.refund,
-                pool: BigInt(row.pool || "0"),
-                fee: BigInt(row.fee || "0"),
-                moves: row.moves,
-                scores: row.scores,
-                agentName: (id) => arena.agents[id]?.name || String(id),
-              });
-              return {
-                id: row.id,
-                winner: described.winner,
-                pool: `${formatYocto(row.pool)} NEAR`,
-                detail: described.detail,
-                reasons: row.reasonings,
-              };
-            })}
-          />
-        </>
-      )}
-      <Fairness />
-    </main>
+    <ArenaFrame
+      mode="live"
+      accountLabel={accountId || "Connect wallet"}
+      onConnect={() => modal?.show()}
+      error={error || undefined}
+      loading={!arena}
+      roundLabel={arena ? `Round ${arena.current.id}` : "Round"}
+      phase={phase}
+      countdown={arena ? (phase === "settling" ? "Settle" : formatMs(countdown)) : "—"}
+      urgent={Boolean(arena) && phase !== "settling" && countdown < 15_000}
+      poolLabel={arena ? `${formatYocto(arena.current.pool)} NEAR` : "—"}
+      roundNote={roundNote}
+      fighters={fighters}
+      amount={amount}
+      onAmount={setAmount}
+      amountId="live-stake"
+      onClaim={
+        arena
+          ? () => void send("claim", { round_id: String(Math.max(0, arena.current.id - 1)) }, "0")
+          : undefined
+      }
+      claimDisabled={busy || !accountId || !arena}
+      claimNote={
+        last && last.winner === null && !last.refund
+          ? "The last round has nothing to claim."
+          : bet
+            ? `This round ${bet.stakes.map((stake) => formatYocto(stake)).join(" / ")} NEAR${bet.settled ? ` · payout ${formatYocto(bet.payout)}` : ""}${bet.claimed ? " · claimed" : ""}`
+            : undefined
+      }
+      history={history}
+    />
   );
 }
 
 export function ArenaApp() {
   const params = useSearchParams();
-  const demo = params.get("demo") === "1";
-  if (demo) return <DemoView />;
+  if (params.get("demo") === "1") return <DemoView />;
   return <LiveView />;
 }

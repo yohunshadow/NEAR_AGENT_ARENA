@@ -6,6 +6,30 @@ function clipReasoning(reasoning: string): string {
   return new TextDecoder().decode(bytes.slice(0, MAX_REASONING_BYTES)).replace(/\uFFFD$/, "");
 }
 
+export interface ModelMessage {
+  content?: string | null;
+  reasoning?: string | null;
+  reasoning_content?: string | null;
+}
+
+/**
+ * Prefer a move in `content`. Reasoning models often leave `content` empty and
+ * put the JSON in `reasoning` or `reasoning_content`. If neither field parses,
+ * the caller falls back to the offline strategy.
+ */
+export function choiceFromMessage(message: ModelMessage | undefined): Choice | null {
+  const content = typeof message?.content === "string" ? message.content : "";
+  if (content.trim()) {
+    const parsed = parseModelChoice(content);
+    if (parsed) return parsed;
+  }
+  const reasoning = [message?.reasoning, message?.reasoning_content]
+    .filter((part): part is string => typeof part === "string" && part.trim().length > 0)
+    .join("\n");
+  if (!reasoning) return null;
+  return parseModelChoice(reasoning);
+}
+
 export function parseModelChoice(text: string): Choice | null {
   const match = text.match(/\{[\s\S]*\}/);
   if (!match) return null;
@@ -39,8 +63,8 @@ export async function chooseMove(input: StrategyInput & { agentName: string; con
   const fallback = offlineChoice(input);
   const apiKey = process.env.NEAR_AI_API_KEY?.trim();
   if (!apiKey) return { choice: fallback, source: "offline" };
-  const base = (process.env.NEAR_AI_BASE_URL || "https://cloud.near.ai/v1").replace(/\/$/, "");
-  const model = process.env.NEAR_AI_MODEL || "deepseek-ai/DeepSeek-V3.1";
+  const base = (process.env.NEAR_AI_BASE_URL || "https://cloud-api.near.ai/v1").replace(/\/$/, "");
+  const model = process.env.NEAR_AI_MODEL || "google/gemini-2.5-flash-lite";
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 20_000);
   try {
@@ -65,10 +89,9 @@ export async function chooseMove(input: StrategyInput & { agentName: string; con
       return { choice: fallback, source: "offline" };
     }
     const body = (await response.json()) as {
-      choices?: { message?: { content?: string } }[];
+      choices?: { message?: ModelMessage }[];
     };
-    const text = body.choices?.[0]?.message?.content ?? "";
-    const parsed = parseModelChoice(text);
+    const parsed = choiceFromMessage(body.choices?.[0]?.message);
     if (!parsed) {
       console.error("NEAR AI reply was not a move; using offline strategy");
       return { choice: fallback, source: "offline" };
