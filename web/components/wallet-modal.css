@@ -1,0 +1,27 @@
+/* Loaded after the selector stylesheet so mint wins over its blue defaults. */
+#near-wallet-selector-modal .nws-modal-wrapper.dark-theme {
+  --selected-wallet-bg: #00ec97;
+  --confirm-button-bg: #00ec97;
+  --confirm-button-bg-hover: #3df5b0;
+  --connected-green: #00ec97;
+  --heading-color: #e7f3ec;
+  --text-color: #a3b0a8;
+  --content-bg: #171e1b;
+  --bottom-section: #101614;
+  --change-path-bg: #101614;
+  --home-button-bg: #101614;
+  --sidebar-border-color: rgba(196, 230, 210, 0.16);
+  --close-button-bg-color: #101614;
+  --close-button-fill-icon-color: #e7f3ec;
+  --wallet-option-bg-hover: rgba(0, 236, 151, 0.14);
+  --wallet-option-outline-color: #00ec97;
+  --get-wallet-outline-color: #00ec97;
+  --secondary-button-bg-color: #00ec97;
+  --secondary-button-border-color: #00ec97;
+  --secondary-button-text-color: #06281a;
+}
+
+#near-wallet-selector-modal .nws-modal button.get-wallet {
+  background: #00ec97;
+  color: #06281a;
+}

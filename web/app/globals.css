@@ -580,13 +580,3 @@ code {
   .stage img { animation: none; }
   .btn, .pill, .phase, .clock, .fighter { transition: none; }
 }
-
-#near-wallet-selector-modal .dark-theme {
-  --selected-wallet-bg: var(--mint);
-  --confirm-button-bg: var(--mint);
-  --confirm-button-bg-hover: var(--mint-hot);
-  --connected-green: var(--mint);
-  --heading-color: var(--ink);
-  --content-bg: var(--paper-2);
-  --bottom-section: var(--paper);
-}
