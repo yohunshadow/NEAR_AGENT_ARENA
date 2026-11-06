@@ -149,8 +149,8 @@ async fn settle_round(world: &World) -> Result<()> {
     let current = &snapshot["current"];
     let begun = json_u64(&current["settle_height"])
         .with_context(|| format!("settle_height in {current}"))?;
-    let height = json_u64(&current["block_height"])
-        .with_context(|| format!("block_height in {current}"))?;
+    let height =
+        json_u64(&current["block_height"]).with_context(|| format!("block_height in {current}"))?;
     if height <= begun {
         world.worker.fast_forward(1).await?;
     }
@@ -558,8 +558,8 @@ async fn worker_offline_mode_commits_and_settles() -> Result<()> {
         "worker should have finalized: {stdout}"
     );
     assert!(
-        done["recent_rounds"][0]["winner"].is_number()
-            || done["recent_rounds"][0]["winner"].is_null()
+        done["recent_rounds"][0]["winner"].is_number(),
+        "all three agents revealed, so an empty pool still has a winner by score: {stdout}\n{done}"
     );
     Ok(())
 }

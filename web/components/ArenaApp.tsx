@@ -13,6 +13,7 @@ import {
   type DemoState,
 } from "../lib/demo";
 import { formatMicro, formatYocto, parseNearToYocto } from "../lib/format";
+import { describeSettledRound } from "../lib/outcome";
 import {
   contractId,
   fetchArena,
@@ -123,13 +124,23 @@ function DemoView() {
         </div>
       </section>
       <HistoryTable
-        rows={state.history.map((row) => ({
-          id: row.id,
-          winner: row.winner === null ? "Refund" : state.agents[row.winner].name,
-          pool: `${formatMicro(row.pool)} NEAR`,
-          detail: row.note,
-          reasons: row.reasonings,
-        }))}
+        rows={state.history.map((row) => {
+          const described = describeSettledRound({
+            winner: row.winner,
+            refund: row.winner === null && row.pool > 0n,
+            pool: row.pool,
+            moves: row.moves,
+            scores: row.scores,
+            agentName: (id) => state.agents[id]?.name ?? String(id),
+          });
+          return {
+            id: row.id,
+            winner: described.winner,
+            pool: `${formatMicro(row.pool)} NEAR`,
+            detail: row.note,
+            reasons: row.reasonings,
+          };
+        })}
       />
       <LogList lines={state.log} />
       <Fairness />
@@ -203,7 +214,9 @@ function Fairness() {
         Aggressive beats Defensive, Defensive beats Balanced, and Balanced beats Aggressive. Each fighter scores 2
         points for a win and 1 for a tie against the other fighters who revealed. The settle block&apos;s random seed
         adds a tie-break smaller than one matchup point. If the full scores are still equal, the lowest agent id wins.
-        In this demo the seed is a local stand-in. On chain it is <code>env::random_seed()</code>.
+        In this demo the seed is a local stand-in. On chain it is <code>env::random_seed()</code>. An empty pool does
+        not cancel that result: if anyone revealed, the highest score still wins. Nobody revealed means there is no
+        winner.
       </p>
     </details>
   );
@@ -215,6 +228,14 @@ function chainCountdown(arena: Arena, fetchedAt: number): number {
   const now = BigInt(arena.now_ns) + BigInt(Date.now() - fetchedAt) * 1_000_000n;
   const left = end > now ? end - now : 0n;
   return Number(left / 1_000_000n);
+}
+
+function phaseLine(arena: Arena, countdown: number): string {
+  const pool = `pool ${formatYocto(arena.current.pool)} NEAR`;
+  if (arena.current.phase === "finalize") return `Finalizing on the next block · ${pool}`;
+  if (arena.current.phase === "settle") return `Reveal window closed · settling · ${pool}`;
+  const label = arena.current.phase === "betting" ? "Betting" : arena.current.phase === "reveal" ? "Reveal" : arena.current.phase;
+  return `${label} · ${formatMs(countdown)} left · ${pool}`;
 }
 
 function LiveView() {
@@ -387,7 +408,7 @@ function LiveView() {
           <section className="panel">
             <h3>Round {arena.current.id}</h3>
             <p className="muted">
-              {arena.current.phase} · {formatMs(countdown)} left · pool {formatYocto(arena.current.pool)} NEAR
+              {phaseLine(arena, countdown)}
               {arena.current.ready_to_settle ? " · ready to settle" : ""}
             </p>
           </section>
@@ -459,6 +480,9 @@ function LiveView() {
               >
                 Claim last round
               </button>
+              {last && last.winner === null && !last.refund ? (
+                <span className="muted">The last round has nothing to claim.</span>
+              ) : null}
               {bet ? (
                 <span className="muted">
                   This round stake {bet.stakes.map((stake) => formatYocto(stake)).join(" / ")}
@@ -468,19 +492,32 @@ function LiveView() {
               ) : null}
             </div>
           </section>
+          {last && last.winner === null ? (
+            <p className="banner">
+              Round {last.id} has no winner
+              {(last.moves ?? []).every((move) => move === null) ? " because no agent revealed" : ""}. A round where
+              fighters reveal still picks a winner by score, even when nobody bet.
+            </p>
+          ) : null}
           <HistoryTable
-            rows={arena.recent_rounds.map((row) => ({
-              id: row.id,
-              winner:
-                row.winner === null
-                  ? row.refund
-                    ? "Refund"
-                    : "No winner"
-                  : arena.agents[row.winner]?.name || String(row.winner),
-              pool: `${formatYocto(row.pool)} NEAR`,
-              detail: row.refund ? "Bets refunded." : `Fee ${formatYocto(row.fee)} NEAR`,
-              reasons: row.reasonings,
-            }))}
+            rows={arena.recent_rounds.map((row) => {
+              const described = describeSettledRound({
+                winner: row.winner,
+                refund: row.refund,
+                pool: BigInt(row.pool || "0"),
+                fee: BigInt(row.fee || "0"),
+                moves: row.moves,
+                scores: row.scores,
+                agentName: (id) => arena.agents[id]?.name || String(id),
+              });
+              return {
+                id: row.id,
+                winner: described.winner,
+                pool: `${formatYocto(row.pool)} NEAR`,
+                detail: described.detail,
+                reasons: row.reasonings,
+              };
+            })}
           />
         </>
       )}

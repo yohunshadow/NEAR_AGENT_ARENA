@@ -44,7 +44,6 @@ export interface DemoState {
   userStakes: [bigint, bigint, bigint];
   agents: [DemoAgent, DemoAgent, DemoAgent];
   choices: [DemoChoice | null, DemoChoice | null, DemoChoice | null];
-  lastWinnerMove: number | null;
   history: HistoryRow[];
   log: string[];
   banner: string;
@@ -79,7 +78,6 @@ export function initialDemo(): DemoState {
     userStakes: [0n, 0n, 0n],
     agents: [agent(0, treasury), agent(1, treasury), agent(2, treasury)],
     choices: [null, null, null],
-    lastWinnerMove: null,
     history: [],
     log: ["Demo round 0 is open. Back a fighter, then advance."],
     banner: "",
@@ -142,13 +140,17 @@ function settle(state: DemoState): DemoState {
   const decision = decide(moves, demoSeed(state.roundId));
   const agents = state.agents.map((item) => ({ ...item })) as DemoState["agents"];
   let userBalance = state.userBalance;
-  let note = "No reveal, so backers are refunded.";
+  let note = "No agent revealed, so this round has no winner.";
   if (decision.winner === null) {
     const refund = state.userStakes.reduce((sum, stake) => sum + stake, 0n);
     userBalance += refund;
+    if (state.pool > 0n) note = "No agent revealed. Stakes were refunded.";
   } else {
     const winner = decision.winner;
-    note = `${NAMES[winner]} wins with ${MOVE_NAMES[moves[winner] ?? 0]}.`;
+    note =
+      state.pool === 0n
+        ? `${NAMES[winner]} wins on score. No bets were placed.`
+        : `${NAMES[winner]} wins with ${MOVE_NAMES[moves[winner] ?? 0]}.`;
     if (state.pool > 0n && state.backed[winner] === 0n) {
       agents[winner].treasury += state.pool;
     } else if (state.pool > 0n) {
@@ -195,7 +197,6 @@ function settle(state: DemoState): DemoState {
       userBalance,
       agents,
       choices: [null, null, null],
-      lastWinnerMove: decision.winner === null ? state.lastWinnerMove : moves[decision.winner],
       history: [history, ...state.history].slice(0, 8),
       banner: note,
     },
@@ -205,10 +206,9 @@ function settle(state: DemoState): DemoState {
 
 export function advance(state: DemoState): DemoState {
   if (state.phase === "betting") {
+    const history = state.history.map((row) => ({ id: row.id, winner: row.winner, moves: row.moves }));
     const choices = [0, 1, 2].map((agentId) =>
-      state.alive[agentId]
-        ? offlineChoice(agentId, state.roundId, state.lastWinnerMove)
-        : null,
+      state.alive[agentId] ? offlineChoice(agentId, state.roundId, history) : null,
     ) as DemoState["choices"];
     const lines = choices
       .map((choice, agentId) =>

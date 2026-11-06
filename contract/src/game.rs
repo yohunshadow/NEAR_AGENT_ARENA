@@ -870,6 +870,28 @@ mod tests {
     }
 
     #[test]
+    fn revealed_moves_win_with_an_empty_pool() {
+        let mut sim = Sim::new(0, 1_000, 1);
+        let salts = [[1u8; 32], [2u8; 32], [3u8; 32]];
+        let moves = [0u8, 1, 2];
+        let reasons = ["press", "fade", "shell"];
+        for i in 0..3 {
+            sim.commit(i as u8, digest(moves[i], &salts[i], reasons[i]), 1_100);
+        }
+        for i in 0..3 {
+            sim.reveal(i as u8, moves[i], &salts[i], reasons[i], 1_600);
+        }
+        assert_eq!(sim.econ.round.pool, 0);
+        let settled = sim.settle(1_600, [0u8; 32]);
+        assert_eq!(settled.pool, 0);
+        assert!(!settled.refund);
+        assert_eq!(settled.fee, 0);
+        assert_eq!(settled.winner, Some(0));
+        assert_eq!(sim.econ.agents[0].wins, 1);
+        assert!(settled.scores.iter().all(|score| score.is_some()));
+    }
+
+    #[test]
     fn solo_reveal_wins() {
         let d = decide(&[None, Some(0), None], &[0u8; 32]);
         assert_eq!(d.winner, Some(1));

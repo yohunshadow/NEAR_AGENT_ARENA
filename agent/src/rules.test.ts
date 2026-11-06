@@ -28,12 +28,39 @@ test("a matchup lead beats maximum entropy", () => {
 });
 
 test("offline strategies are stable personalities", () => {
-  assert.equal(offlineChoice({ agentId: 0, roundId: 3, lastWinnerMove: null }).move, 0);
-  assert.equal(offlineChoice({ agentId: 1, roundId: 3, lastWinnerMove: 0 }).move, 1);
-  assert.equal(offlineChoice({ agentId: 2, roundId: 3, lastWinnerMove: 0 }).move, 2);
-  const again = offlineChoice({ agentId: 1, roundId: 9, lastWinnerMove: 2 });
+  assert.equal(offlineChoice({ agentId: 0, roundId: 3, history: [] }).move, 0);
+  assert.equal(
+    offlineChoice({ agentId: 1, roundId: 3, history: [{ id: 2, winner: 0, moves: [0, 1, 2] }] }).move,
+    1,
+  );
+  assert.equal(
+    offlineChoice({ agentId: 2, roundId: 3, history: [{ id: 2, winner: 0, moves: [0, 1, 2] }] }).move,
+    2,
+  );
+  const again = offlineChoice({
+    agentId: 1,
+    roundId: 9,
+    history: [{ id: 8, winner: 2, moves: [0, 1, 2] }],
+  });
   assert.equal(again.move, 0);
   assert.match(again.reasoning, /Mean-Reversion/);
+  assert.match(again.reasoning, /Round 8/);
+});
+
+test("offline strategy keeps the last real winner across no-winner rounds", () => {
+  const history = [
+    { id: 74, winner: null, moves: [null, null, null] },
+    { id: 73, winner: null, moves: [null, null, null] },
+    { id: 71, winner: 0, moves: [0, 1, 2] },
+  ];
+  const momentum = offlineChoice({ agentId: 0, roundId: 75, history });
+  assert.equal(momentum.move, 0);
+  assert.match(momentum.reasoning, /Round 71/);
+  assert.doesNotMatch(momentum.reasoning, /No winner in recent rounds/);
+  assert.match(momentum.reasoning, /2 newer rounds had no winner/);
+  const opened = offlineChoice({ agentId: 2, roundId: 1, history: [] });
+  assert.match(opened.reasoning, /No winner in recent rounds/);
+  assert.match(opened.reasoning, /Defensive/);
 });
 
 test("model JSON is parsed and junk falls through", () => {

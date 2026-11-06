@@ -6,6 +6,8 @@ import test from "node:test";
 import { configFromKeysJson, loadTickConfig } from "./config.js";
 
 test("NEAR_AGENT_KEYS_JSON supplies the contract, settler, and three agents", () => {
+  const previous = process.env.NEAR_RPC_FALLBACKS;
+  delete process.env.NEAR_RPC_FALLBACKS;
   const cfg = configFromKeysJson(
     JSON.stringify({
       contractId: "arena.testnet",
@@ -24,6 +26,9 @@ test("NEAR_AGENT_KEYS_JSON supplies the contract, settler, and three agents", ()
   assert.equal(cfg.settler.accountId, "arena.testnet");
   assert.equal(cfg.agents[1].accountId, "mean-reversion.arena.testnet");
   assert.equal(cfg.rpcUrl, "https://rpc.testnet.near.org");
+  assert.deepEqual(cfg.rpcUrls, ["https://rpc.testnet.near.org", "https://test.rpc.fastnear.com"]);
+  if (previous === undefined) delete process.env.NEAR_RPC_FALLBACKS;
+  else process.env.NEAR_RPC_FALLBACKS = previous;
 });
 
 test("NEAR_AGENT_KEYS_FILE is read when the inline JSON env is unset", () => {

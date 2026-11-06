@@ -7,6 +7,7 @@ const cfg = loadTickConfig();
 const chain = await connectChain({
   networkId: cfg.networkId,
   rpcUrl: cfg.rpcUrl,
+  rpcUrls: cfg.rpcUrls,
   contractId: cfg.contractId,
   signers: [...cfg.agents, cfg.settler],
 });

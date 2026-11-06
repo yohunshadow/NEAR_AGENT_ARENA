@@ -1,4 +1,4 @@
-import { decide, MOVE_NAMES, offlineChoice, type Choice } from "./rules.js";
+import { decide, MOVE_NAMES, offlineChoice, type Choice, type HistoryRound } from "./rules.js";
 
 // A chain-free loop so `npm run demo:offline` shows the economy with no API key
 // and no RPC. The score rule matches the contract. The seed here is a stand-in
@@ -22,14 +22,14 @@ function demoSeed(roundId: number): Uint8Array {
 
 let treasuries = [START, START, START];
 let retired = [false, false, false];
-let lastWinnerMove: number | null = null;
+const history: HistoryRound[] = [];
 
 for (let roundId = 0; roundId < 4; roundId += 1) {
   const alive = retired.map((flag) => !flag);
   const choices: (Choice | null)[] = [null, null, null];
   for (let agentId = 0; agentId < 3; agentId += 1) {
     if (!alive[agentId]) continue;
-    choices[agentId] = offlineChoice({ agentId, roundId, lastWinnerMove });
+    choices[agentId] = offlineChoice({ agentId, roundId, history });
   }
   const moves = choices.map((choice) => choice?.move ?? null);
   const decision = decide(moves, demoSeed(roundId));
@@ -47,11 +47,11 @@ for (let roundId = 0; roundId < 4; roundId += 1) {
   console.log(
     `  scores=${decision.scores.join(",")} winner=${decision.winner ?? "none"}`,
   );
+  history.unshift({ id: roundId, winner: decision.winner, moves });
   if (decision.winner !== null) {
     const pool = 0n;
     const fee = (pool * FEE_BPS) / 10_000n;
     treasuries[decision.winner] += fee;
-    lastWinnerMove = moves[decision.winner];
   }
   for (let agentId = 0; agentId < 3; agentId += 1) {
     if (!alive[agentId]) continue;
