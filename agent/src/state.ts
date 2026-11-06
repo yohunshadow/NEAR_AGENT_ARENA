@@ -32,6 +32,16 @@ export class RevealStore {
 
   save(roundId: number, agentId: number, pending: PendingReveal): void {
     this.data[this.key(roundId, agentId)] = pending;
+    this.flush();
+  }
+
+  /** Drop a preimage that cannot match the commitment already stored on chain. */
+  forget(roundId: number, agentId: number): void {
+    delete this.data[this.key(roundId, agentId)];
+    this.flush();
+  }
+
+  private flush(): void {
     writeFileSync(this.path, JSON.stringify(this.data, null, 2));
   }
 }

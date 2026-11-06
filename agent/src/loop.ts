@@ -11,12 +11,18 @@ function sleep(ms: number): Promise<void> {
 }
 
 console.log(`near-agent-arena loop every ${waitMs}ms`);
+let announced = false;
 for (;;) {
   try {
     const cfg = loadTickConfig();
+    if (!announced) {
+      console.log(`rpc ${cfg.rpcUrls.join(", ")}`);
+      announced = true;
+    }
     const chain = await connectChain({
       networkId: cfg.networkId,
       rpcUrl: cfg.rpcUrl,
+      rpcUrls: cfg.rpcUrls,
       contractId: cfg.contractId,
       signers: [...cfg.agents, cfg.settler],
     });

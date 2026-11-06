@@ -39,39 +39,53 @@ export function decide(moves: (number | null)[], seed: Uint8Array): Decision {
   return { winner, scores };
 }
 
+export interface HistoryRound {
+  id: number;
+  winner: number | null;
+  moves: (number | null)[];
+}
+
+const AGENT_NAMES = ["Momentum", "Mean-Reversion", "Breakout"] as const;
+
+function priorWinner(history: HistoryRound[]): { roundId: number; agentId: number; move: number; skipped: number } | null {
+  for (let index = 0; index < history.length; index += 1) {
+    const round = history[index];
+    if (round.winner === null || round.winner === undefined) continue;
+    const move = round.moves[round.winner];
+    if (move !== 0 && move !== 1 && move !== 2) continue;
+    return { roundId: round.id, agentId: round.winner, move, skipped: index };
+  }
+  return null;
+}
+
 export function offlineChoice(
   agentId: number,
   roundId: number,
-  lastWinnerMove: number | null,
+  history: HistoryRound[],
 ): { move: number; reasoning: string } {
-  if (agentId === 0) {
-    const move = lastWinnerMove ?? 0;
+  const name = AGENT_NAMES[agentId] ?? `Agent ${agentId}`;
+  const prior = priorWinner(history);
+  if (!prior) {
+    const move = agentId === 1 ? 1 : agentId === 2 ? 2 : 0;
     return {
       move,
-      reasoning:
-        lastWinnerMove === null
-          ? "No prior winner. Momentum opens Aggressive."
-          : `Momentum repeats the last winning move (${MOVE_NAMES[move]}).`,
+      reasoning: `No winner in recent rounds before round ${roundId}. ${name} opens ${MOVE_NAMES[move]}.`,
     };
+  }
+  const who = AGENT_NAMES[prior.agentId] ?? `Agent ${prior.agentId}`;
+  const context =
+    prior.skipped === 0
+      ? `Round ${prior.roundId} winner ${who} played ${MOVE_NAMES[prior.move]}.`
+      : `Round ${prior.roundId} winner ${who} played ${MOVE_NAMES[prior.move]}. ${prior.skipped} newer ${prior.skipped === 1 ? "round" : "rounds"} had no winner.`;
+  if (agentId === 0) {
+    return { move: prior.move, reasoning: `${context} Momentum repeats ${MOVE_NAMES[prior.move]}.` };
   }
   if (agentId === 1) {
-    const move = lastWinnerMove === null ? 1 : counterMove(lastWinnerMove);
-    return {
-      move,
-      reasoning:
-        lastWinnerMove === null
-          ? "No prior winner. Mean-Reversion opens Balanced."
-          : `Mean-Reversion plays ${MOVE_NAMES[move]} to beat the last winner.`,
-    };
+    const move = counterMove(prior.move);
+    return { move, reasoning: `${context} Mean-Reversion plays ${MOVE_NAMES[move]} to beat it.` };
   }
-  const move = lastWinnerMove === null ? 2 : (lastWinnerMove + 2) % 3;
-  return {
-    move,
-    reasoning:
-      lastWinnerMove === null
-        ? "No prior winner. Breakout opens Defensive."
-        : `Breakout steps off the last line with ${MOVE_NAMES[move]}.`,
-  };
+  const move = (prior.move + 2) % 3;
+  return { move, reasoning: `${context} Breakout steps off that line with ${MOVE_NAMES[move]}.` };
 }
 
 export function demoSeed(roundId: number): Uint8Array {

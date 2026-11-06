@@ -1,9 +1,11 @@
 import { readFileSync } from "node:fs";
+import { rpcEndpoints } from "./rpc.js";
 import type { SignerConfig } from "./types.js";
 
 export interface TickEnv {
   networkId: string;
   rpcUrl: string;
+  rpcUrls: string[];
   contractId: string;
   agents: SignerConfig[];
   settler: SignerConfig;
@@ -39,9 +41,12 @@ export function configFromKeysJson(raw: string, stateDir: string): TickEnv {
   if (!settler.accountId || !settler.privateKey) {
     throw new Error("NEAR_AGENT_KEYS_JSON is missing the settler key");
   }
+  const networkId = parsed.networkId || "testnet";
+  const rpcUrl = parsed.rpcUrl || "https://rpc.testnet.near.org";
   return {
-    networkId: parsed.networkId || "testnet",
-    rpcUrl: parsed.rpcUrl || "https://rpc.testnet.near.org",
+    networkId,
+    rpcUrl,
+    rpcUrls: rpcEndpoints(rpcUrl, networkId, process.env.NEAR_RPC_FALLBACKS),
     contractId: parsed.contractId,
     agents: parsed.agents,
     settler,
@@ -63,9 +68,12 @@ export function loadTickConfig(): TickEnv {
   const settlerKey = process.env.SETTLER_PRIVATE_KEY?.trim();
   const settler =
     settlerId && settlerKey ? { accountId: settlerId, privateKey: settlerKey } : agents[0];
+  const networkId = process.env.NEAR_NETWORK_ID?.trim() || "testnet";
+  const rpcUrl = process.env.NEAR_RPC_URL?.trim() || "https://rpc.testnet.near.org";
   return {
-    networkId: process.env.NEAR_NETWORK_ID?.trim() || "testnet",
-    rpcUrl: process.env.NEAR_RPC_URL?.trim() || "https://rpc.testnet.near.org",
+    networkId,
+    rpcUrl,
+    rpcUrls: rpcEndpoints(rpcUrl, networkId, process.env.NEAR_RPC_FALLBACKS),
     contractId: required("CONTRACT_ID"),
     agents,
     settler,

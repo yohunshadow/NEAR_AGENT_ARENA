@@ -58,7 +58,7 @@ cd agent && npm run demo:offline
 
 See four printed rounds. With `NEAR_AI_API_KEY` unset, Momentum, Mean-Reversion, and Breakout each print a move and a reasoning line. Treasuries fall by upkeep. After they hit zero the log says `retired=true`. The last line is `offline demo finished (no RPC, no API key)`.
 
-To tick the live testnet contract, copy `agent/.env.example` to `agent/.env`. Point `NEAR_AGENT_KEYS_FILE` at `~/.near-credentials/near-agent-arena-keys.json` (or paste that file into `NEAR_AGENT_KEYS_JSON`). `npm run tick` runs one pass. `npm run loop` repeats forever; `TICK_INTERVAL_MS` defaults to 60000 and cannot go below 5000, which is the setting to use under pm2 or nohup. Do not commit `.env`.
+To tick the live testnet contract, copy `agent/.env.example` to `agent/.env`. Point `NEAR_AGENT_KEYS_FILE` at `~/.near-credentials/near-agent-arena-keys.json` (or paste that file into `NEAR_AGENT_KEYS_JSON`). `npm run tick` runs one pass. `npm run loop` repeats forever; `TICK_INTERVAL_MS` defaults to 60000 and cannot go below 5000, which is the setting to use under pm2 or nohup. On testnet each RPC attempt aborts after 8 seconds and then tries `https://test.rpc.fastnear.com`. Set `NEAR_RPC_FALLBACKS=off` to stay on `NEAR_RPC_URL`. Do not commit `.env`. Restart the loop after pulling this worker so the new RPC client and history reader are the process that is running.
 
 ### 5. Web demo, no wallet
 
@@ -68,7 +68,7 @@ cd web && npm ci && npm run dev
 
 Open `http://localhost:3000/?demo=1`.
 
-See three agent cards with treasuries, a round countdown, and your demo balance. Click **Back Momentum** (or another fighter), then **Advance phase**. See that agent's reasoning. Click **Advance phase** again. See the round settle, the pool move, treasuries change by the fee and by upkeep, and a row in round history. An agent whose treasury reaches zero shows **Retired**. **Fund 2 NEAR** stakes it back into the next betting window. Nothing is signed. Leave demo mode with the **Leave demo** link.
+See the three fighters — Momentum, Mean-Reversion, and Breakout — with portraits, treasuries, and a round countdown. Click **Back Momentum** (or another fighter), then **Advance phase**. See that agent's move and reasoning. Click **Advance phase** again. See the round settle, the pool move, treasuries change by the fee and by upkeep, and a row in round history with the winner's portrait. An agent whose treasury reaches zero shows **RETIRED**. **Revive with 2 NEAR** stakes it back into the next betting window. Nothing is signed. Leave demo mode with **Leave demo**.
 
 `npm run build` in `web/` is the production build used by CI and by Vercel with root directory `web`.
 
@@ -158,6 +158,10 @@ All three play Balanced and the seed is 32 zero bytes. Every matchup is 2 and ev
 
 Nobody reveals. There is no winner. If the pool is non-zero, `claim` refunds each backer's stake once.
 
+A revealed round still has a winner when the pool is empty. The score rule does not look at bets. Wins increment, the fee is zero, and there is nothing to claim. Rounds on the live arena that finalized `winner=null` with `pool=0` had no revealed moves. They were not rejected for being empty. The worker's RPC client retried a hung `rpc.testnet.near.org` socket with no deadline, so one `commit` could outlast the reveal window. That tick then observed `phase=settle` and finalized before anyone revealed. The panic `commit during betting only` is the same late transaction landing after `betting_end_ns`. The worker now bounds each attempt, falls back to another testnet RPC, and reveals (retrying while the window is open) before it begins settlement.
+
+The offline strategy reads `get_recent_rounds` (up to 20, newest first) and reasons from the newest round that actually has a winner. A no-winner round no longer makes the next sentence say there was no prior winner.
+
 ### Money
 
 `fee = pool * winner_fee_bps / 10_000` goes to the winner's treasury before upkeep. The rest is `claim`ed by the winner's backers:
@@ -183,10 +187,10 @@ Upkeep is charged only from agents who were alive this round: `min(treasury, upk
 - Agent accounts as NPC identities. Commit and reveal check `predecessor_account_id`, so a function-call key limited to those two methods can act for the agent and cannot settle, withdraw, or move the treasury.
 - Claim-based payouts. Settlement is O(1) in the number of backers.
 - Views: `get_arena`, `get_current_round`, `get_recent_rounds`, `get_agents`, `get_user_bet`, `preview_commitment`.
-- The worker calls NEAR AI Cloud's OpenAI-compatible API at `https://cloud.near.ai/v1/chat/completions` when `NEAR_AI_API_KEY` is set, and falls back to a deterministic strategy when it is not.
+- The worker calls NEAR AI Cloud's OpenAI-compatible API at `https://cloud-api.near.ai/v1/chat/completions` when `NEAR_AI_API_KEY` is set, and falls back to a deterministic strategy when it is not. The default model is `google/gemini-2.5-flash-lite`. `https://cloud.near.ai/v1` is not that API.
 - The web app uses NEAR Wallet Selector (MyNearWallet) on testnet when `NEXT_PUBLIC_CONTRACT_ID` is set.
 
-Public RPC for a later deploy: `https://rpc.testnet.near.org`.
+Public RPC for a later deploy: `https://rpc.testnet.near.org`, with `https://test.rpc.fastnear.com` as the worker's testnet fallback.
 
 ## Layout
 
@@ -270,6 +274,15 @@ export ARENA_ACCOUNT=near-agent-arena-97b380.testnet
 ```
 
 The cron workflow `.github/workflows/agent-cron.yml` runs every 10 minutes. It exits 0 without doing work until `NEAR_AGENT_KEYS_JSON` or `CONTRACT_ID` is set in the repository secrets. `NEAR_AI_API_KEY` is optional. On a long-lived box, `cd agent && NEAR_AGENT_KEYS_FILE=~/.near-credentials/near-agent-arena-keys.json npm run loop`.
+
+This scoring behavior is already in contract `0.2.0`. No wasm redeploy and no `migrate` are required for no-winner rounds. Restart the worker so it picks up the RPC fallback and the `get_recent_rounds` reader:
+
+```bash
+# stop the old loop (the pid from when you started it, or pkill -f "src/loop.ts")
+cd agent && NEAR_AGENT_KEYS_FILE=~/.near-credentials/near-agent-arena-keys.json npm run loop
+```
+
+`get_recent_rounds` is already on the deployed contract. After the restart, a tick that begins in betting and is still inside the reveal window when the commits return will reveal before `begin_settle`. Rounds that already finalized with no reveals stay that way.
 
 ## Testnet deploy
 
