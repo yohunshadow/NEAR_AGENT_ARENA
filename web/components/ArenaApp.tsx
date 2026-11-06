@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import "@near-wallet-selector/modal-ui/styles.css";
+import "./wallet-modal.css";
 import { useSearchParams } from "next/navigation";
 import {
   advance,
@@ -22,6 +23,7 @@ import {
   type Arena,
   type UserBet,
 } from "../lib/near";
+import type { WalletModuleFactory } from "@near-wallet-selector/core";
 import { AGENT_BLURBS, MOVE_NAMES } from "../lib/rules";
 import { ArenaFrame, type FighterView, type HistoryView } from "./ArenaFrame";
 
@@ -246,14 +248,14 @@ function LiveView() {
     if (!id) return;
     let cancelled = false;
     void (async () => {
-      const [{ setupWalletSelector }, { setupModal }, { setupMyNearWallet }] = await Promise.all([
+      const [{ setupWalletSelector }, { setupModal }, { testnetWalletModules }] = await Promise.all([
         import("@near-wallet-selector/core"),
         import("@near-wallet-selector/modal-ui"),
-        import("@near-wallet-selector/my-near-wallet"),
+        import("../lib/wallets"),
       ]);
       const nextSelector = await setupWalletSelector({
         network: nearNetwork() as "testnet",
-        modules: [setupMyNearWallet()],
+        modules: testnetWalletModules(id) as Array<WalletModuleFactory>,
       });
       const nextModal = setupModal(nextSelector, { contractId: id, theme: "dark" });
       const state = nextSelector.store.getState();
