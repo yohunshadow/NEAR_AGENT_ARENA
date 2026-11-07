@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { commitmentHex } from "./hash.js";
 import { choiceFromMessage, parseModelChoice } from "./llm.js";
-import { decide, offlineChoice } from "./rules.js";
+import { acceptModelChoice, decide, historyFacts, offlineChoice } from "./rules.js";
 
 test("commitment preimage matches the contract vector", () => {
   const salt = new Uint8Array(32).fill(0x11);
@@ -61,6 +61,65 @@ test("offline strategy keeps the last real winner across no-winner rounds", () =
   const opened = offlineChoice({ agentId: 2, roundId: 1, history: [] });
   assert.match(opened.reasoning, /No winner in recent rounds/);
   assert.match(opened.reasoning, /Defensive/);
+});
+
+test("mean-reversion cannot call a counter the same move as the winner", () => {
+  const history = [{ id: 87, winner: 0, moves: [0, 0, 2] }];
+  const input = { agentId: 1, roundId: 88, history };
+  const model = {
+    move: 0,
+    reasoning:
+      "Momentum won the last round with Aggressive (0), so I will counter with Aggressive (0) to beat its previous move.",
+  };
+  const grounded = acceptModelChoice(input, model);
+  assert.equal(grounded.move, 1);
+  assert.match(grounded.reasoning, /Round 87/);
+  assert.match(grounded.reasoning, /Balanced/);
+  assert.doesNotMatch(grounded.reasoning, /counter with Aggressive|plays Aggressive/i);
+});
+
+test("a no-winner round is not a draw and does not erase the previous winner", () => {
+  const history = [
+    { id: 86, winner: null, moves: [null, null, null] },
+    { id: 85, winner: 1, moves: [0, 0, 2] },
+  ];
+  const input = { agentId: 1, roundId: 87, history };
+  const model = {
+    move: 0,
+    reasoning: "The last round was a draw. I will play Aggressive to break the stalemate and gain momentum.",
+  };
+  const grounded = acceptModelChoice(input, model);
+  assert.equal(grounded.move, 1);
+  assert.match(grounded.reasoning, /Round 85/);
+  assert.match(grounded.reasoning, /1 newer round had no winner/);
+  assert.doesNotMatch(grounded.reasoning, /draw|stalemate|No prior winner/i);
+  assert.match(historyFacts(input), /Your previous revealed move: Aggressive in round 85/);
+});
+
+test("a faithful model line is kept, and a false prior move or winner is not", () => {
+  const history = [{ id: 87, winner: 0, moves: [0, 1, 2] }];
+  const input = { agentId: 1, roundId: 88, history };
+  const faithful = {
+    move: 1,
+    reasoning: "Round 87 winner Momentum played Aggressive. Mean-Reversion plays Balanced to beat it.",
+  };
+  assert.equal(acceptModelChoice(input, faithful), faithful);
+  const lied = acceptModelChoice(input, {
+    move: 1,
+    reasoning: "I played Defensive last time, so I play Balanced now.",
+  });
+  assert.match(lied.reasoning, /Round 87/);
+  assert.doesNotMatch(lied.reasoning, /Defensive/);
+  const invented = acceptModelChoice(
+    { agentId: 1, roundId: 1, history: [] },
+    { move: 1, reasoning: "Round 4 winner Momentum played Aggressive." },
+  );
+  assert.match(invented.reasoning, /No winner in recent rounds/);
+  const opened = {
+    move: 1,
+    reasoning: "No winner in recent rounds before round 1. Mean-Reversion opens Balanced.",
+  };
+  assert.equal(acceptModelChoice({ agentId: 1, roundId: 1, history: [] }, opened), opened);
 });
 
 test("model JSON is parsed and junk falls through", () => {

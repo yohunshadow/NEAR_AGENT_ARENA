@@ -32,6 +32,7 @@ export interface FighterView {
   poolOnAgent?: string;
   move: string | null;
   reasoning: string | null;
+  speechLabel?: string | null;
   highlight: boolean;
   backed: boolean;
   backLabel: string;
@@ -63,6 +64,7 @@ export interface ArenaFrameProps {
   roundLabel?: string;
   phase: "betting" | "reveal" | "settling" | "idle";
   countdown?: string;
+  clockCaption?: string;
   urgent?: boolean;
   poolLabel?: string;
   roundNote?: string;
@@ -73,8 +75,10 @@ export interface ArenaFrameProps {
   amountId?: string;
   amountHint?: string;
   onClaim?: () => void;
+  claimLabel?: string;
   claimDisabled?: boolean;
   claimNote?: string;
+  phaseNote?: string;
   history: HistoryView[];
   log?: string[];
   footnote?: string;
@@ -200,9 +204,13 @@ export function ArenaFrame(props: ArenaFrameProps) {
                 <div className="figure">
                   <p className="kicker">{props.roundLabel || (props.loading ? "Syncing" : "Round")}</p>
                   <p className={`clock${props.urgent ? " urgent" : ""}`}>
-                    <span className="sr-only">{props.countdown || "—"}</span>
+                    <span className="sr-only">
+                      {props.clockCaption ? `${props.clockCaption}. ` : ""}
+                      {props.countdown || "—"}
+                    </span>
                     <NumberTicker className="clock-num" value={props.countdown || "—"} />
                   </p>
+                  {props.clockCaption ? <p className="hint clock-caption">{props.clockCaption}</p> : null}
                 </div>
                 <div className="figure">
                   <p className="kicker">Pool</p>
@@ -214,7 +222,9 @@ export function ArenaFrame(props: ArenaFrameProps) {
                 </div>
               </div>
               <div className="round-side">
-                <PhaseTrack phase={props.phase} reduce={reduce} />
+                <p className="kicker">Status</p>
+                <PhaseTrack phase={props.phase} />
+                {props.phaseNote ? <p className="hint phase-note">{props.phaseNote}</p> : null}
                 {props.onAdvance ? (
                   <button className="btn mint" type="button" onClick={props.onAdvance}>
                     Advance phase
@@ -233,11 +243,21 @@ export function ArenaFrame(props: ArenaFrameProps) {
                   onChange={(event) => props.onAmount?.(event.target.value)}
                 />
                 {props.onClaim ? (
-                  <button className="btn ghost" type="button" disabled={props.claimDisabled} onClick={props.onClaim}>
-                    Claim last round
+                  <button
+                    className="btn ghost"
+                    type="button"
+                    disabled={props.claimDisabled}
+                    aria-describedby={props.claimNote ? "claim-note" : undefined}
+                    onClick={props.onClaim}
+                  >
+                    {props.claimLabel || "Claim last round"}
                   </button>
                 ) : null}
-                {props.claimNote ? <span className="hint">{props.claimNote}</span> : null}
+                {props.claimNote ? (
+                  <span className="hint" id="claim-note" role="status">
+                    {props.claimNote}
+                  </span>
+                ) : null}
                 {props.amountHint ? <span className="hint">{props.amountHint}</span> : null}
               </div>
             ) : null}
@@ -311,24 +331,14 @@ export function ArenaFrame(props: ArenaFrameProps) {
   );
 }
 
-function PhaseTrack({ phase, reduce }: { phase: ArenaFrameProps["phase"]; reduce: boolean }) {
+function PhaseTrack({ phase }: { phase: ArenaFrameProps["phase"] }) {
   return (
-    <div className="phase-track" role="group" aria-label="Round phase">
+    <div className="phase-track" role="group" aria-label="Round phase, set by the contract">
       {PHASES.map((item) => {
         const on = phase === item.id;
         return (
           <div key={item.id} className={`phase-slot${on ? " on" : ""}`} aria-current={on ? "step" : undefined}>
-            {on ? (
-              reduce ? (
-                <span className="phase-pill" />
-              ) : (
-                <motion.span
-                  layoutId="phase-pill"
-                  className="phase-pill"
-                  transition={{ type: "spring", bounce: 0, duration: 0.45 }}
-                />
-              )
-            ) : null}
+            {on ? <span className="phase-pill" /> : null}
             <span className="phase-label">{item.label}</span>
           </div>
         );
@@ -397,6 +407,7 @@ function FighterCard({ fighter }: { fighter: FighterView }) {
         <p className="speech">
           {fighter.move || fighter.reasoning ? (
             <>
+              {fighter.speechLabel ? <span className="hint">{fighter.speechLabel}. </span> : null}
               {fighter.move ? <em>{fighter.move}. </em> : null}
               {fighter.reasoning}
             </>

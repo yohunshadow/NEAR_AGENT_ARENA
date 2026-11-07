@@ -46,4 +46,4 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - name: Build the Next.js app
         working-directory: web
-        run: npm ci && npm run build
+        run: npm ci && node --experimental-strip-types --test lib/*.test.ts && npm run build

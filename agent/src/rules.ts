@@ -145,3 +145,90 @@ export function offlineChoice(input: StrategyInput): Choice {
     reasoning: `${context} Breakout steps off that line with ${MOVE_NAMES[move]}.`,
   };
 }
+
+/** This agent's newest revealed move, skipping rounds where it did not reveal. */
+export function previousOwnMove(
+  history: HistoryRound[],
+  agentId: number,
+): { roundId: number; move: number } | null {
+  for (const round of history) {
+    const move = round.moves[agentId];
+    if (move === 0 || move === 1 || move === 2) return { roundId: round.id, move };
+  }
+  return null;
+}
+
+/** Plain-language chain facts the model is not allowed to contradict. */
+export function historyFacts(input: StrategyInput): string {
+  const name = AGENT_NAMES[input.agentId] ?? `Agent ${input.agentId}`;
+  const prior = priorWinner(input.history);
+  const own = previousOwnMove(input.history, input.agentId);
+  const expected = MOVE_NAMES[offlineChoice(input).move];
+  const lines = [
+    prior
+      ? `Newest winner: round ${prior.roundId}, ${AGENT_NAMES[prior.agentId] ?? `Agent ${prior.agentId}`} played ${MOVE_NAMES[prior.move]}.`
+      : "No settled round in this history has a winner. Do not invent one.",
+  ];
+  if (prior && prior.skipped > 0) {
+    const noun = prior.skipped === 1 ? "round" : "rounds";
+    lines.push(
+      `${prior.skipped} newer settled ${noun} had no winner. That is not a draw, a stalemate, or "no prior winner".`,
+    );
+  }
+  lines.push(
+    own
+      ? `Your previous revealed move: ${MOVE_NAMES[own.move]} in round ${own.roundId}. Do not claim a different one.`
+      : "You have no revealed move in this history. Do not claim one.",
+  );
+  lines.push(`The move that matches ${name}'s strategy this round: ${expected}.`);
+  return lines.join(" ");
+}
+
+function claimsChosenMove(reasoning: string, moveName: string): boolean {
+  return new RegExp(
+    `\\b(?:play|plays|playing|choose|chooses|chose|pick|picks|picked|counter with)\\s+${moveName}\\b`,
+    "i",
+  ).test(reasoning);
+}
+
+function claimsOwnPastMove(reasoning: string, moveName: string): boolean {
+  return (
+    new RegExp(`\\b(?:i|my)\\b[^.]{0,40}\\b(?:played|chose|opened)\\b[^.]{0,24}\\b${moveName}\\b`, "i").test(
+      reasoning,
+    ) || new RegExp(`\\bmy last(?: move)?\\b[^.]{0,24}\\b${moveName}\\b`, "i").test(reasoning)
+  );
+}
+
+/** True when the model text disagrees with chain history or with this agent's strategy. */
+export function reasoningContradicts(input: StrategyInput, reasoning: string): boolean {
+  const prior = priorWinner(input.history);
+  const expected = MOVE_NAMES[offlineChoice(input).move];
+  for (const name of MOVE_NAMES) {
+    if (name !== expected && claimsChosenMove(reasoning, name)) return true;
+  }
+  const own = previousOwnMove(input.history, input.agentId);
+  if (own) {
+    for (const name of MOVE_NAMES) {
+      if (name !== MOVE_NAMES[own.move] && claimsOwnPastMove(reasoning, name)) return true;
+    }
+  } else if (claimsOwnPastMove(reasoning, "Aggressive") || claimsOwnPastMove(reasoning, "Balanced") || claimsOwnPastMove(reasoning, "Defensive")) {
+    return true;
+  }
+  if (prior) {
+    if (/\bno\b[^.]{0,24}\bwinner\b/i.test(reasoning)) return true;
+    if (/\b(?:draw|stalemate)\b/i.test(reasoning)) return true;
+    return false;
+  }
+  if (/\bwinner\b/i.test(reasoning) && !/\bno\b[^.]{0,24}\bwinner\b/i.test(reasoning)) return true;
+  return false;
+}
+
+/**
+ * Keep a model choice only when its move matches the strategy and its sentence
+ * matches chain history. Otherwise commit the deterministic line.
+ */
+export function acceptModelChoice(input: StrategyInput, model: Choice): Choice {
+  const grounded = offlineChoice(input);
+  if (model.move !== grounded.move || reasoningContradicts(input, model.reasoning)) return grounded;
+  return model;
+}
