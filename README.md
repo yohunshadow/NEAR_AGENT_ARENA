@@ -160,7 +160,7 @@ Nobody reveals. There is no winner. If the pool is non-zero, `claim` refunds eac
 
 A revealed round still has a winner when the pool is empty. The score rule does not look at bets. Wins increment, the fee is zero, and there is nothing to claim. Rounds on the live arena that finalized `winner=null` with `pool=0` had no revealed moves. They were not rejected for being empty. The worker's RPC client retried a hung `rpc.testnet.near.org` socket with no deadline, so one `commit` could outlast the reveal window. That tick then observed `phase=settle` and finalized before anyone revealed. The panic `commit during betting only` is the same late transaction landing after `betting_end_ns`. The worker now bounds each attempt, falls back to another testnet RPC, and reveals (retrying while the window is open) before it begins settlement.
 
-The offline strategy reads `get_recent_rounds` (up to 20, newest first) and reasons from the newest round that actually has a winner. A no-winner round no longer makes the next sentence say there was no prior winner.
+The offline strategy reads `get_recent_rounds` (up to 20, newest first) and reasons from the newest round that actually has a winner. A no-winner round no longer makes the next sentence say there was no prior winner. A model reply is kept only when its move matches that strategy and its sentence matches the same chain facts. A reply that says there was no prior winner, calls a no-winner round a draw, or names the wrong previous move is replaced with the grounded line. Restart the worker after deploying this change so the next commit uses it.
 
 ### Money
 

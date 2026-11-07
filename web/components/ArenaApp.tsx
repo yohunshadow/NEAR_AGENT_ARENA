@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import "@near-wallet-selector/modal-ui/styles.css";
 import "./wallet-modal.css";
 import { useSearchParams } from "next/navigation";
@@ -13,6 +13,8 @@ import {
   tickDemo,
   type DemoState,
 } from "../lib/demo";
+import { claimErrorText, claimPresentation } from "../lib/claim";
+import { formatClock, preferSnapshot, presentedClock, type SnapshotMark } from "../lib/clock";
 import { formatMicro, formatYocto, parseNearToYocto } from "../lib/format";
 import { describeSettledRound } from "../lib/outcome";
 import {
@@ -36,13 +38,6 @@ function telemetry(mode: "demo" | "live" | "setup", round: string) {
     round,
     mode,
   };
-}
-
-function formatMs(ms: number): string {
-  const total = Math.max(0, Math.ceil(ms / 1000));
-  const minutes = Math.floor(total / 60);
-  const seconds = total % 60;
-  return `${minutes}:${seconds.toString().padStart(2, "0")}`;
 }
 
 function ratios(values: bigint[]): number[] {
@@ -125,7 +120,9 @@ function DemoView() {
       }
       roundLabel={`Round ${state.roundId}`}
       phase={state.phase}
-      countdown={formatMs(state.msLeft)}
+      countdown={formatClock(state.msLeft)}
+      clockCaption={state.phase === "betting" ? "Left in betting" : "Left in reveal"}
+      phaseNote="Advance phase skips the clock in this browser. The status labels are not buttons."
       urgent={state.msLeft < 3000}
       poolLabel={`${formatMicro(state.pool)} NEAR`}
       roundNote={`Your balance ${formatMicro(state.userBalance)} NEAR`}
@@ -164,20 +161,6 @@ function historyFromDemo(row: DemoState["history"][number], state: DemoState): H
   };
 }
 
-function chainCountdown(arena: Arena, fetchedAt: number): number {
-  const end =
-    arena.current.phase === "betting" ? BigInt(arena.current.betting_end_ns) : BigInt(arena.current.reveal_end_ns);
-  const now = BigInt(arena.now_ns) + BigInt(Date.now() - fetchedAt) * 1_000_000n;
-  const left = end > now ? end - now : 0n;
-  return Number(left / 1_000_000n);
-}
-
-function livePhase(phase: string): "betting" | "reveal" | "settling" {
-  if (phase === "betting") return "betting";
-  if (phase === "reveal") return "reveal";
-  return "settling";
-}
-
 function LiveView() {
   const id = contractId();
   const [arena, setArena] = useState<Arena | null>(null);
@@ -188,6 +171,13 @@ function LiveView() {
   const [busy, setBusy] = useState(false);
   const [fetchedAt, setFetchedAt] = useState(Date.now());
   const [now, setNow] = useState(Date.now());
+  const [claimBet, setClaimBet] = useState<UserBet | null | undefined>(undefined);
+  const [claimLookupError, setClaimLookupError] = useState("");
+  const [claimNonce, setClaimNonce] = useState(0);
+  const [waitNote, setWaitNote] = useState("");
+  const [pendingKind, setPendingKind] = useState<"claim" | "other" | null>(null);
+  const applied = useRef<SnapshotMark | null>(null);
+  const requestId = useRef(0);
   const [modal, setModal] = useState<{ show: () => void } | null>(null);
   const [selector, setSelector] = useState<{
     wallet: () => Promise<{
@@ -210,15 +200,23 @@ function LiveView() {
   useEffect(() => {
     if (!id) return;
     let cancelled = false;
+    const applyArena = (next: Arena) => {
+      const mark = { nowNs: BigInt(next.now_ns), roundId: next.current.id };
+      if (!preferSnapshot(applied.current, mark)) return;
+      applied.current = mark;
+      setArena(next);
+      setFetchedAt(Date.now());
+      setError("");
+    };
     const load = async () => {
+      const token = ++requestId.current;
       try {
         const next = await fetchArena();
-        if (cancelled) return;
-        setArena(next);
-        setFetchedAt(Date.now());
-        setError("");
+        if (cancelled || token !== requestId.current) return;
+        applyArena(next);
       } catch (err) {
-        if (!cancelled) setError(err instanceof Error ? err.message : String(err));
+        if (cancelled || token !== requestId.current) return;
+        setError(err instanceof Error ? err.message : String(err));
       }
     };
     void load();
@@ -228,6 +226,29 @@ function LiveView() {
       clearInterval(timer);
     };
   }, [id]);
+
+  const previousRoundId = arena && arena.current.id > 0 ? arena.current.id - 1 : null;
+
+  useEffect(() => {
+    if (!id || !accountId || previousRoundId === null) {
+      setClaimBet(undefined);
+      setClaimLookupError("");
+      return;
+    }
+    let cancelled = false;
+    setClaimBet(undefined);
+    setClaimLookupError("");
+    void fetchUserBet(accountId, previousRoundId)
+      .then((value) => {
+        if (!cancelled) setClaimBet(value);
+      })
+      .catch(() => {
+        if (!cancelled) setClaimLookupError(`Could not read round ${previousRoundId}.`);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [id, accountId, previousRoundId, claimNonce]);
 
   useEffect(() => {
     if (!id || !accountId || !arena) return;
@@ -273,15 +294,48 @@ function LiveView() {
     };
   }, [id]);
 
-  const countdown = useMemo(() => (arena ? chainCountdown(arena, fetchedAt) : 0), [arena, fetchedAt, now]);
+  const clock = useMemo(() => {
+    if (!arena) return null;
+    return presentedClock({
+      phase: arena.current.phase,
+      bettingEndNs: BigInt(arena.current.betting_end_ns),
+      revealEndNs: BigInt(arena.current.reveal_end_ns),
+      nowNs: BigInt(arena.now_ns),
+      fetchedAtMs: fetchedAt,
+      nowMs: now,
+    });
+  }, [arena, fetchedAt, now]);
+
+  function applyArena(next: Arena) {
+    const mark = { nowNs: BigInt(next.now_ns), roundId: next.current.id };
+    if (!preferSnapshot(applied.current, mark)) return;
+    applied.current = mark;
+    setArena(next);
+    setFetchedAt(Date.now());
+  }
 
   async function send(methodName: string, args: Record<string, unknown>, deposit: string) {
     if (!selector || !accountId) {
-      modal?.show();
+      if (modal) modal.show();
+      else setError("The wallet list is still loading.");
       return;
     }
+    const kind = methodName === "claim" ? "claim" : "other";
     setBusy(true);
+    setPendingKind(kind);
     setError("");
+    setWaitNote(
+      kind === "claim"
+        ? "Opening your wallet. Approve the claim there."
+        : "Opening your wallet. Approve the request there.",
+    );
+    const timer = window.setTimeout(() => {
+      setWaitNote(
+        kind === "claim"
+          ? "Still waiting for the wallet. Approve the claim there if it opened."
+          : "Still waiting for the wallet. Approve the request there if it opened.",
+      );
+    }, 8000);
     try {
       const wallet = await selector.wallet();
       await wallet.signAndSendTransaction({
@@ -295,12 +349,16 @@ function LiveView() {
         ],
       });
       const next = await fetchArena();
-      setArena(next);
-      setFetchedAt(Date.now());
+      applyArena(next);
+      if (kind === "claim") setClaimNonce((value) => value + 1);
+      setWaitNote("");
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setWaitNote("");
+      setError(kind === "claim" ? claimErrorText(err) : err instanceof Error ? err.message : String(err));
     } finally {
+      window.clearTimeout(timer);
       setBusy(false);
+      setPendingKind(null);
     }
   }
 
@@ -317,13 +375,24 @@ function LiveView() {
   }
 
   const last = arena?.recent_rounds[0];
-  const phase = arena ? livePhase(arena.current.phase) : "idle";
+  const phase = clock?.phase ?? "idle";
   const treasuries = arena ? arena.agents.map((agent) => BigInt(agent.treasury || "0")) : [];
   const bars = ratios(treasuries);
   const fighters: FighterView[] = arena
     ? arena.agents.map((agent) => {
-        const reasoning = last?.reasonings?.[agent.id] || arena.current.reasonings[agent.id];
-        const move = last?.moves?.[agent.id] ?? arena.current.moves[agent.id];
+        const currentMove = arena.current.moves[agent.id];
+        const revealedNow = currentMove !== null && currentMove !== undefined;
+        const pastMove = last?.moves?.[agent.id];
+        const pastReason = last?.reasonings?.[agent.id] ?? null;
+        const move = revealedNow ? currentMove : (pastMove ?? null);
+        const reasoning = revealedNow ? arena.current.reasonings[agent.id] : pastReason;
+        const speechLabel = revealedNow
+          ? "This round"
+          : move !== null || reasoning
+            ? last
+              ? `Round ${last.id}`
+              : null
+            : null;
         const userStake = bet?.stakes?.[agent.id];
         return {
           id: agent.id,
@@ -339,10 +408,11 @@ function LiveView() {
           poolOnAgent: `${formatYocto(arena.current.backed[agent.id] || "0")} NEAR`,
           move: move !== null && move !== undefined ? MOVE_NAMES[move] : null,
           reasoning: reasoning || null,
+          speechLabel,
           highlight: last?.winner === agent.id,
           backed: userStake ? BigInt(userStake) > 0n : false,
           backLabel: `Back ${agent.name}`,
-          backDisabled: busy || arena.current.phase !== "betting" || !arena.current.alive[agent.id],
+          backDisabled: busy || phase !== "betting" || !arena.current.alive[agent.id],
           onBack: () => {
             const deposit = parseNearToYocto(amount);
             if (deposit === null) {
@@ -397,17 +467,48 @@ function LiveView() {
         .join(". ")
     : "reading testnet";
 
+  const claim = claimPresentation({
+    accountConnected: Boolean(accountId),
+    previousRoundId,
+    currentRoundId: arena?.current.id ?? null,
+    bet:
+      claimBet === undefined || claimBet === null
+        ? claimBet
+        : {
+            settled: claimBet.settled,
+            claimed: claimBet.claimed,
+            payoutYocto: BigInt(claimBet.payout || "0"),
+          },
+    pending: pendingKind === "claim",
+    waitNote: pendingKind === "claim" ? waitNote : undefined,
+  });
+  const claimNote = claimLookupError && accountId ? claimLookupError : claim.note;
+  const claimLabel =
+    claim.action === "claim" && claim.payoutYocto !== null
+      ? `Claim ${formatYocto(claim.payoutYocto)} NEAR`
+      : claim.label;
+
   return (
     <ArenaFrame
       mode="live"
       accountLabel={accountId || "Connect wallet"}
-      onConnect={() => modal?.show()}
+      onConnect={() => {
+        if (!modal) {
+          setError("The wallet list is still loading.");
+          return;
+        }
+        setError("");
+        modal.show();
+      }}
+      notice={pendingKind === "other" && waitNote ? waitNote : undefined}
       error={error || undefined}
       loading={!arena}
       roundLabel={arena ? `Round ${arena.current.id}` : "Round"}
       phase={phase}
-      countdown={arena ? (phase === "settling" ? "Settle" : formatMs(countdown)) : "—"}
-      urgent={Boolean(arena) && phase !== "settling" && countdown < 15_000}
+      countdown={arena ? (phase === "settling" ? "Settle" : formatClock(clock?.remainingMs ?? 0)) : "—"}
+      clockCaption={clock?.caption}
+      phaseNote="The contract changes the phase. These labels are not buttons."
+      urgent={Boolean(clock) && phase !== "settling" && (clock?.remainingMs ?? 0) < 15_000}
       poolLabel={arena ? `${formatYocto(arena.current.pool)} NEAR` : "—"}
       roundNote={roundNote}
       fighters={fighters}
@@ -416,17 +517,24 @@ function LiveView() {
       amountId="live-stake"
       onClaim={
         arena
-          ? () => void send("claim", { round_id: String(Math.max(0, arena.current.id - 1)) }, "0")
+          ? () => {
+              if (claim.action === "connect") {
+                if (!modal) {
+                  setError("The wallet list is still loading.");
+                  return;
+                }
+                setError("");
+                modal.show();
+                return;
+              }
+              if (claim.action !== "claim" || claim.roundId === null) return;
+              void send("claim", { round_id: String(claim.roundId) }, "0");
+            }
           : undefined
       }
-      claimDisabled={busy || !accountId || !arena}
-      claimNote={
-        last && last.winner === null && !last.refund
-          ? "The last round has nothing to claim."
-          : bet
-            ? `This round ${bet.stakes.map((stake) => formatYocto(stake)).join(" / ")} NEAR${bet.settled ? ` · payout ${formatYocto(bet.payout)}` : ""}${bet.claimed ? " · claimed" : ""}`
-            : undefined
-      }
+      claimLabel={claimLabel}
+      claimDisabled={!claim.enabled || busy || Boolean(claimLookupError && accountId)}
+      claimNote={arena ? claimNote : undefined}
       history={history}
       telemetry={telemetry("live", arena ? String(arena.current.id) : "—")}
     />

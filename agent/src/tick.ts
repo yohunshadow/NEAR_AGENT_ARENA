@@ -1,6 +1,6 @@
 import { commitmentHex, randomSalt } from "./hash.js";
 import { chooseMove } from "./llm.js";
-import { AGENT_NAMES, MOVE_NAMES, type HistoryRound } from "./rules.js";
+import { AGENT_NAMES, historyFacts, MOVE_NAMES, type HistoryRound } from "./rules.js";
 import { RevealStore } from "./state.js";
 import type { Chain } from "./chain.js";
 import type { Arena, SettledRound, SignerConfig } from "./types.js";
@@ -46,9 +46,16 @@ function revealFailure(error: unknown): "done" | "closed" | "mismatch" | "retry"
   return "retry";
 }
 
+function moveLabel(move: number | null): string | null {
+  if (move !== 0 && move !== 1 && move !== 2) return null;
+  return MOVE_NAMES[move];
+}
+
 function contextFor(arena: Arena, agentId: number, history: HistoryRound[]): string {
   const agent = arena.agents[agentId];
+  const facts = historyFacts({ agentId, roundId: arena.current.id, history });
   return JSON.stringify({
+    facts,
     round_id: arena.current.id,
     phase: arena.current.phase,
     your_id: agentId,
@@ -65,8 +72,13 @@ function contextFor(arena: Arena, agentId: number, history: HistoryRound[]): str
     })),
     recent_rounds: history.slice(0, 8).map((round) => ({
       id: round.id,
-      winner: round.winner,
-      moves: round.moves,
+      winner: round.winner === null || round.winner === undefined ? null : (AGENT_NAMES[round.winner] ?? round.winner),
+      no_winner: round.winner === null || round.winner === undefined,
+      moves: {
+        Momentum: moveLabel(round.moves[0] ?? null),
+        MeanReversion: moveLabel(round.moves[1] ?? null),
+        Breakout: moveLabel(round.moves[2] ?? null),
+      },
     })),
   });
 }

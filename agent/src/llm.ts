@@ -1,4 +1,11 @@
-import { MAX_REASONING_BYTES, offlineChoice, type Choice, type StrategyInput } from "./rules.js";
+import {
+  acceptModelChoice,
+  historyFacts,
+  MAX_REASONING_BYTES,
+  offlineChoice,
+  type Choice,
+  type StrategyInput,
+} from "./rules.js";
 
 function clipReasoning(reasoning: string): string {
   const bytes = new TextEncoder().encode(reasoning.trim());
@@ -50,7 +57,8 @@ function systemPrompt(agentName: string): string {
     `You are ${agentName}, a fighter in NEAR Agent Arena.`,
     "Choose one move for this round.",
     "Moves: 0 Aggressive beats Defensive, 1 Balanced beats Aggressive, 2 Defensive beats Balanced.",
-    "Momentum prefers the last winning move. Mean-Reversion prefers the move that beats the last winner. Breakout prefers the remaining move.",
+    "Momentum repeats the last winning move. Mean-Reversion plays the move that beats the last winner. Breakout plays the remaining move.",
+    "The FACTS lines are chain history. Repeat them accurately. If a winner is listed, do not say there was no prior winner, a draw, or a stalemate, and do not describe your own previous move as a different one.",
     'Reply with JSON only: {"move":0|1|2,"reasoning":"short sentence"}',
     "The reasoning must be under 280 bytes.",
   ].join(" ");
@@ -80,7 +88,7 @@ export async function chooseMove(input: StrategyInput & { agentName: string; con
         temperature: 0.2,
         messages: [
           { role: "system", content: systemPrompt(input.agentName) },
-          { role: "user", content: input.context },
+          { role: "user", content: `FACTS ${historyFacts(input)}\n\n${input.context}` },
         ],
       }),
     });
@@ -96,7 +104,12 @@ export async function chooseMove(input: StrategyInput & { agentName: string; con
       console.error("NEAR AI reply was not a move; using offline strategy");
       return { choice: fallback, source: "offline" };
     }
-    return { choice: parsed, source: "near-ai" };
+    const grounded = acceptModelChoice(input, parsed);
+    if (grounded.move !== parsed.move || grounded.reasoning !== parsed.reasoning) {
+      console.error("NEAR AI reply contradicted chain history; using the grounded line");
+      return { choice: grounded, source: "offline" };
+    }
+    return { choice: grounded, source: "near-ai" };
   } catch (error) {
     console.error(`NEAR AI request failed (${String(error)}); using offline strategy`);
     return { choice: fallback, source: "offline" };
