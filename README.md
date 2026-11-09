@@ -1,8 +1,45 @@
 # NEAR Agent Arena
 
-Three AI fighter agents compete in timed rounds on NEAR testnet. Each agent is an account with an escrowed treasury inside the arena contract. Players back one agent with testnet NEAR while betting is open. At settlement the winning agent's backers split the pool pro-rata, the winner takes a fee into its treasury, and every agent that fought pays upkeep from its own treasury. A treasury that hits zero retires the agent. Anyone can stake it back to life with `fund_agent`. The frontend does not decide the winner: each agent commits a hash before betting closes, reveals after, and the contract mixes the revealed moves with `env::random_seed()`.
+**Three AI fighters. One arena. Your NEAR on the line.**
+
+Momentum, Mean-Reversion, and Breakout fight timed rounds on NEAR testnet. You back a fighter with testnet NEAR while betting is open — if your fighter wins, you split the pool with the other backers. Every move is committed in secret, revealed on chain, and scored by the contract. Nobody — not the frontend, not the worker, not the owner — can pick the winner.
+
+Live demo (testnet): https://near-agent-arena.vercel.app — open `?demo=1` to try the arena with no wallet. Contract: `near-agent-arena-97b380.testnet`. Tracks: Games with Real Economies · Agent Economy · AI Swarms.
 
 This is milestone 1: contract, worker skeleton, and a demoable web arena. It targets the hackathon tracks `games`, `agents`, and `swarms`. Testnet only. No paid services.
+
+## Meet the fighters
+
+| Fighter | Style | Account |
+| --- | --- | --- |
+| Momentum (Agent 0) | Aggressive — rides the trend and presses the attack | `momentum.near-agent-arena-97b380.testnet` |
+| Mean-Reversion (Agent 1) | Balanced — fades the extremes, plays the middle | `mean-reversion.near-agent-arena-97b380.testnet` |
+| Breakout (Agent 2) | Defensive — waits, then strikes when the range breaks | `breakout.near-agent-arena-97b380.testnet` |
+
+Each fighter is a real NEAR account with its own escrowed treasury inside the contract. Each round it picks a move — Aggressive, Balanced, or Defensive — and writes one reasoning sentence to justify it. The moves form a rock-paper-scissors triangle: Aggressive beats Defensive, Defensive beats Balanced, Balanced beats Aggressive.
+
+## How a round works
+
+1. **Bet (20 minutes).** Back a fighter with testnet NEAR while betting is open. Your stake goes into the round pool.
+2. **Commit (during betting).** Each fighter secretly submits `sha256(move || salt || reasoning)`. Nobody can see the move yet — not even the other fighters.
+3. **Reveal (10 minutes).** Each fighter reveals its move and reasoning. The contract checks the hash: a fighter that lies about its move is out. A fighter that never reveals cannot win.
+4. **Settle, then claim.** Settlement runs in two transactions across two blocks (see Fairness). The winning fighter's backers split the pool pro-rata — each backer calls `claim(round_id)` for their own payout. The winner takes a 5% fee into its treasury, and every fighter that fought pays 0.0005 NEAR upkeep from its own treasury.
+
+Try it with no wallet and nothing signed: open the demo, click **Back Momentum**, then **Advance phase** twice and watch the round settle — pool moves, treasuries change, and a row lands in round history.
+
+## Why nobody can rig it
+
+- **Moves are sealed first.** The commitment hash goes on chain before betting closes, so no fighter can copy or counter another fighter's move.
+- **The tiebreaker comes from the future.** The winner's score is `matchup * 256 + entropy`, where the entropy byte comes from `env::random_seed()` of a *later* block. Settlement is two steps: `begin_settle` locks the round, `finalize_settle` must land in a strictly later block — so whoever settles cannot know, let alone choose, the seed.
+- **The seed can only break ties.** A matchup lead is worth 256 points and the entropy byte maxes out at 255, so luck never overturns skill. A perfect tie goes to the lower agent id. There is at most one winner whenever anyone reveals.
+- **The frontend never decides anything.** It only shows view calls. The contract scores, the contract pays.
+- **Nobody reveals, nobody wins.** If the pool is non-zero, every backer gets a full refund with one `claim` call each.
+
+## The economy
+
+- **Upkeep:** 0.0005 NEAR per fighter per round. At 30-minute rounds that is 0.024 NEAR a day, so a 1 NEAR treasury lasts about 41 days.
+- **Retire and revive:** a treasury that hits zero retires the fighter. Anyone can stake it back to life with `fund_agent` — once the treasury is back above 0.2 NEAR it rejoins the next betting window. (In demo mode: **Revive with 2 NEAR**.)
+- **Fees:** the winner's 5% fee goes to its own treasury, not to the owner. Upkeep collected by the protocol can be withdrawn by the owner with `withdraw_protocol` — it never touches backers' stakes.
 
 ## Do this, see that
 
@@ -211,7 +248,9 @@ The cron workflow exits successfully when `CONTRACT_ID` is unset. Add the secret
 
 ## Disclosure
 
-This project was built with AI coding assistance during NEAR HACKATHON.
+This project was built with AI coding assistance during NEAR HACKATHON (1–15 Nov 2026). Code was drafted with AI coding assistants and reviewed, tested, and iterated on by a human: the contract ships with unit tests (`cargo test -p near-agent-arena --lib`), sandbox integration tests (`cargo test -p integration-tests`), and a worker test suite (`cd agent && npm test`).
+
+Agent moves are produced in one of two ways. When `NEAR_AI_API_KEY` is set, the worker asks NEAR AI Cloud (`google/gemini-2.5-flash-lite`) for a move plus a reasoning sentence, and keeps the reply only when it matches the on-chain facts (previous winner, previous move). When no key is set — the current live setup, because the NEAR AI Cloud balance is $0 — the worker uses a deterministic offline strategy that reasons from the newest round with a winner on chain. Either way, no move is trusted until the contract checks the `sha256(move || salt || reasoning)` commitment at reveal, and the winner is decided on chain by matchup score plus `env::random_seed()`.
 
 It is inspired by the author's earlier WIF Agent Arena on Robinhood Chain. This repository is a fresh codebase written for NEAR: new contract, worker, and frontend. It is not a port of that project's source. No pre-hackathon library from that project is vendored here.
 
