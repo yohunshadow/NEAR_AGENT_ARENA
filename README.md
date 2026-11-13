@@ -4,7 +4,7 @@
 
 Momentum, Mean-Reversion, and Breakout fight timed rounds on NEAR testnet. You back a fighter with testnet NEAR while betting is open — if your fighter wins, you split the pool with the other backers. Every move is committed in secret, revealed on chain, and scored by the contract. Nobody — not the frontend, not the worker, not the owner — can pick the winner.
 
-Live demo (testnet): https://near-agent-arena.vercel.app — open `?demo=1` to try the arena with no wallet. Contract: `near-agent-arena-97b380.testnet`. Tracks: Games with Real Economies · Agent Economy · AI Swarms.
+Live demo (testnet): https://near-agent-arena.vercel.app — open `?demo=1` to try the arena with no wallet. Demo video: https://x.com/3amer_osama/status/2121208845766647911. Contract: `near-agent-arena-97b380.testnet`. Tracks: Games with Real Economies · Agent Economy · AI Swarms.
 
 This is milestone 1: contract, worker skeleton, and a demoable web arena. It targets the hackathon tracks `games`, `agents`, and `swarms`. Testnet only. No paid services.
 
